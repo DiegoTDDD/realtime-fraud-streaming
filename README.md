@@ -105,10 +105,10 @@ Card testing arrives in bursts, so it dominates the per-minute fraud counts even
 
 ### Steps
 
-1. **Start Redpanda**
+1. **Create and activate the environment**
    ```bash
-   docker compose up -d
-   docker exec -it redpanda rpk topic create transactions -p 3
+   conda create -n fraud python=3.11 -y
+   conda activate fraud
    ```
 
 2. **Install dependencies**
@@ -116,17 +116,23 @@ Card testing arrives in bursts, so it dominates the per-minute fraud counts even
    pip install -r requirements.txt
    ```
 
-3. **Start the Spark streaming job** (terminal 1)
+3. **Start Redpanda**
+   ```bash
+   docker compose up -d
+   docker exec -it redpanda rpk topic create transactions -p 3
+   ```
+
+4. **Start the Spark streaming job** (terminal 1)
    ```bash
    python spark/streaming_job.py
    ```
 
-4. **Start the producer** (terminal 2)
+5. **Start the producer** (terminal 2)
    ```bash
    python producer/producer.py
    ```
 
-5. **Launch the dashboard** (terminal 3)
+6. **Launch the dashboard** (terminal 3)
    ```bash
    streamlit run dashboard/app.py
    ```
