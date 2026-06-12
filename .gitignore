@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Conda / env
+.python-version
+
+# Data — heavy streaming output, never version raw/full layers
+data/bronze/
+data/gold/
+data/_checkpoints/
+data/_spark_metadata/
+
+# Keep a small Gold sample for the deployed dashboard (see docs)
+!data/gold_sample/
+!data/gold_sample/**
+
+# Spark / Hadoop local cruft
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets
+.env

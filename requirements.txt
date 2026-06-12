@@ -1,0 +1,16 @@
+# Kafka client (Redpanda speaks the Kafka protocol)
+confluent-kafka==2.5.3
+
+# Spark Structured Streaming
+pyspark==3.5.3
+
+# Dashboard
+streamlit==1.39.0
+plotly==5.24.1
+
+# Data handling
+pandas==2.2.3
+pyarrow==17.0.0
+
+# Realistic fake data for the producer
+faker==30.3.0
