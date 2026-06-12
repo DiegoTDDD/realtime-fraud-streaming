@@ -2,8 +2,8 @@
 
 A real-time streaming data pipeline that detects credit-card fraud patterns as transactions happen. Synthetic card transactions are produced to **Redpanda** (Kafka API), processed by **Spark Structured Streaming** with windowed aggregations and watermarking, persisted to a layered **Parquet** store, and surfaced on a live **Streamlit** dashboard.
 
-**Live dashboard:** _<!-- deploy link goes here -->_
-**Repo:** `github.com/DiegoTDDD/realtime-fraud-streaming`
+- **Live dashboard:** https://realtime-fraud-streaming.streamlit.app
+- **Repo:** github.com/DiegoTDDD/realtime-fraud-streaming
 
 ---
 
@@ -93,7 +93,17 @@ Card testing arrives in bursts, so it dominates the per-minute fraud counts even
 
 ## Running it locally
 
-**Prerequisites:** Docker Desktop, a Python 3.11 environment, and Java 17.
+### Prerequisites
+
+- **Docker Desktop** (with WSL 2 enabled on Windows)
+- **Python 3.11** — a conda environment is recommended
+- **Java 17** — Spark runs on the JVM. Java 8 causes compatibility issues; install Java 17 isolated in the conda env:
+  ```bash
+  conda install -c conda-forge openjdk=17 -y
+  ```
+- **Windows only — Hadoop native binaries.** Spark needs `winutils.exe` and `hadoop.dll` to write files on Windows. Place both in `C:\hadoop\bin` (downloadable from the community `cdarlint/winutils` repo, version 3.3.x). The streaming job points `HADOOP_HOME` there automatically.
+
+### Steps
 
 1. **Start Redpanda**
    ```bash
@@ -136,13 +146,14 @@ realtime-fraud-streaming/
 │   ├── streaming_job.py      # Spark Structured Streaming: Bronze + Gold
 │   └── export_sample.py      # consolidates Gold into a deploy sample
 ├── dashboard/
-│   └── app.py                # Streamlit live dashboard
+│   ├── app.py                # Streamlit live dashboard
+│   └── requirements.txt      # lightweight deps for the deployed dashboard
 ├── data/
 │   ├── bronze/               # raw transactions (gitignored)
 │   ├── gold/                 # windowed aggregates (gitignored)
 │   └── gold_sample/          # small sample for the deployed dashboard
 ├── docs/screenshots/
-├── requirements.txt
+├── requirements.txt          # full local pipeline dependencies
 └── .gitignore
 ```
 
