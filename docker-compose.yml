@@ -15,9 +15,9 @@ services:
       - --pandaproxy-addr=0.0.0.0:8082
       - --advertise-pandaproxy-addr=localhost:8082
     ports:
-      - "19092:19092"   # Kafka API (host -> Redpanda) used by producer and Spark
-      - "8081:8081"     # Schema Registry
-      - "8082:8082"     # REST proxy
+      - "127.0.0.1:19092:19092"   # Kafka API (host -> Redpanda) used by producer and Spark
+      - "127.0.0.1:8081:8081"     # Schema Registry
+      - "127.0.0.1:8082:8082"     # REST proxy
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 10s
@@ -30,6 +30,6 @@ services:
     depends_on:
       - redpanda
     ports:
-      - "8080:8080"     # Web UI -> open http://localhost:8080
+      - "127.0.0.1:8080:8080"     # Web UI -> open http://localhost:8080
     environment:
       KAFKA_BROKERS: redpanda:29092
