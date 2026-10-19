@@ -62,31 +62,60 @@ jobs:
       - name: Start the Spark job
         run: nohup python spark/streaming_job.py > spark.log 2>&1 &
 
-      - name: Wait for Bronze Parquet files
+      - name: Wait until Spark has written real data (Bronze, then Gold)
         run: |
-          for i in $(seq 1 60); do
-            if ls data/bronze/*.parquet >/dev/null 2>&1; then echo "bronze data written after ~$((i*5))s"; exit 0; fi
-            sleep 5
-          done
-          echo "::error::no Bronze Parquet files after 300s"
-          tail -40 spark.log
-          exit 1
+          python - <<'PY'
+          import glob, subprocess, sys, time
+          import pandas as pd
 
-      - name: Wait for Gold windows (best effort, needs ~4 minutes of events)
-        run: |
-          for i in $(seq 1 72); do
-            if ls data/gold/*.parquet >/dev/null 2>&1; then echo "gold data written after ~$((i*5))s"; exit 0; fi
-            sleep 5
-          done
-          echo "::warning::no Gold windows closed within 6 minutes"
+          def rows(path):
+              n = 0
+              for f in glob.glob(path + "/*.parquet"):
+                  try:
+                      n += len(pd.read_parquet(f))
+                  except Exception:
+                      pass
+              return n
+
+          def alive(pattern):
+              return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
+
+          def wait(path, minimum, seconds, label, process):
+              start = time.time()
+              while time.time() - start < seconds:
+                  n = rows(path)
+                  if n >= minimum:
+                      print(f"{label}: {n} rows after {int(time.time() - start)}s")
+                      return
+                  if not alive(process):
+                      print(f"::error::the Spark job stopped before {label} had data (rows so far: {n})")
+                      sys.exit(1)
+                  time.sleep(5)
+              print(f"::error::{label}: only {rows(path)} rows after {seconds}s (needed {minimum})")
+              sys.exit(1)
+
+          wait("data/bronze", 500, 300, "bronze", "streaming_job.py")
+          wait("data/gold", 1, 480, "gold windows (need ~4 minutes of events)", "streaming_job.py")
+          PY
 
       - name: Check the output
         run: |
           python - <<'PY'
+          import sys
           import pandas as pd
           b = pd.read_parquet("data/bronze")
+          g = pd.read_parquet("data/gold")
           print("bronze rows:", len(b), "| columns:", list(b.columns))
-          assert len(b) > 100 and {"transaction_id", "amount", "is_fraud"} <= set(b.columns)
+          print("gold rows:", len(g), "| columns:", list(g.columns))
+          need_b = {"transaction_id", "amount", "is_fraud", "event_time"}
+          need_g = {"window_start", "tx_count", "total_amount", "fraud_total"}
+          if not need_b <= set(b.columns) or not need_g <= set(g.columns):
+              print(f"::error::unexpected columns. bronze={list(b.columns)} gold={list(g.columns)}")
+              sys.exit(1)
+          if len(b) < 500 or g["tx_count"].sum() <= 0:
+              print(f"::error::too little data: bronze={len(b)} rows, gold tx_count total={g['tx_count'].sum()}")
+              sys.exit(1)
+          print("pipeline output ok")
           PY
 
       - name: Dashboard opens without errors
