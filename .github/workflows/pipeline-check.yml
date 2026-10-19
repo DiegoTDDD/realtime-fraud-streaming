@@ -1,0 +1,114 @@
+name: Pipeline check
+
+# Runs the real pipeline: Redpanda (Docker) -> producer -> Spark Structured
+# Streaming (Kafka connector) -> Parquet, then opens the dashboard.
+# The "3.5.8" column tests a newer PySpark BEFORE it is adopted.
+on:
+  push:
+    paths:
+      - requirements.txt
+      - "spark/**"
+      - "producer/**"
+      - "dashboard/**"
+      - docker-compose.yml
+      - ".github/workflows/pipeline-check.yml"
+  workflow_dispatch:
+
+jobs:
+  streaming:
+    name: Redpanda + Spark / pyspark ${{ matrix.pyspark }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pyspark: [current, "3.5.8"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Use the candidate PySpark
+        if: matrix.pyspark != 'current'
+        run: |
+          sed -i "s/^pyspark==.*/pyspark==${{ matrix.pyspark }}/" requirements.txt
+          sed -i "s/spark-sql-kafka-0-10_2.12:[0-9.]*/spark-sql-kafka-0-10_2.12:${{ matrix.pyspark }}/" spark/streaming_job.py
+          grep -n "^pyspark==" requirements.txt
+          grep -n "KAFKA_PKG =" spark/streaming_job.py
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip check
+
+      - name: Start Redpanda
+        run: docker compose up -d --wait redpanda
+
+      - name: Start the producer
+        run: |
+          nohup python producer/producer.py > producer.log 2>&1 &
+          sleep 15
+          tail -3 producer.log
+
+      - name: Start the Spark job
+        run: nohup python spark/streaming_job.py > spark.log 2>&1 &
+
+      - name: Wait for Bronze Parquet files
+        run: |
+          for i in $(seq 1 60); do
+            if ls data/bronze/*.parquet >/dev/null 2>&1; then echo "bronze data written after ~$((i*5))s"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::no Bronze Parquet files after 300s"
+          tail -40 spark.log
+          exit 1
+
+      - name: Wait for Gold windows (best effort, needs ~4 minutes of events)
+        run: |
+          for i in $(seq 1 72); do
+            if ls data/gold/*.parquet >/dev/null 2>&1; then echo "gold data written after ~$((i*5))s"; exit 0; fi
+            sleep 5
+          done
+          echo "::warning::no Gold windows closed within 6 minutes"
+
+      - name: Check the output
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          b = pd.read_parquet("data/bronze")
+          print("bronze rows:", len(b), "| columns:", list(b.columns))
+          assert len(b) > 100 and {"transaction_id", "amount", "is_fraud"} <= set(b.columns)
+          PY
+
+      - name: Dashboard opens without errors
+        run: |
+          pip install pytest >/dev/null
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          at = AppTest.from_file("dashboard/app.py", default_timeout=120).run()
+          assert not at.exception, [e.value for e in at.exception]
+          print("dashboard ok")
+          PY
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "--- producer"; tail -20 producer.log || true
+          echo "--- spark"; tail -60 spark.log || true
+          docker compose logs --tail 40 redpanda || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          pkill -f producer.py || true
+          pkill -f streaming_job.py || true
+          docker compose down -v
