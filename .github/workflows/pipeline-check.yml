@@ -2,7 +2,6 @@ name: Pipeline check
 
 # Runs the real pipeline: Redpanda (Docker) -> producer -> Spark Structured
 # Streaming (Kafka connector) -> Parquet, then opens the dashboard.
-# The "3.5.8" column tests a newer PySpark BEFORE it is adopted.
 on:
   push:
     paths:
@@ -16,13 +15,9 @@ on:
 
 jobs:
   streaming:
-    name: Redpanda + Spark / pyspark ${{ matrix.pyspark }}
+    name: Redpanda + Spark
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        pyspark: [current, "3.5.8"]
     steps:
       - uses: actions/checkout@v4
 
@@ -35,14 +30,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Use the candidate PySpark
-        if: matrix.pyspark != 'current'
-        run: |
-          sed -i "s/^pyspark==.*/pyspark==${{ matrix.pyspark }}/" requirements.txt
-          sed -i "s/spark-sql-kafka-0-10_2.12:[0-9.]*/spark-sql-kafka-0-10_2.12:${{ matrix.pyspark }}/" spark/streaming_job.py
-          grep -n "^pyspark==" requirements.txt
-          grep -n "KAFKA_PKG =" spark/streaming_job.py
 
       - name: Install requirements
         run: |
