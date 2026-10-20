@@ -169,6 +169,12 @@ realtime-fraud-streaming/
 
 The transaction stream is synthetic and generated locally. Fraud labels are injected deliberately so the same dataset can later train and evaluate a supervised model. The deployed dashboard reads a small consolidated sample of Gold windows; the full pipeline regenerates unlimited data on demand.
 
+## Automated checks
+
+- **Pipeline check** (`pipeline-check.yml`) runs the real pipeline on a GitHub runner: Redpanda in Docker, the producer and the Spark Structured Streaming job, waits until Bronze and Gold Parquet files contain data, checks their columns and opens the dashboard.
+- **Security audit** (`security-audit.yml`) audits every `requirements*.txt` with `pip-audit` whenever dependencies change and every Monday. It fails only when a vulnerable package has a fixed version available.
+- **App health** (`app-health.yml`) opens the [live app](https://realtime-fraud-streaming.streamlit.app) in a real browser after each push and once a day (waking it if it was asleep) and fails if the app shows an error.
+
 ## Roadmap
 
 This pipeline is the streaming foundation for an applied real-time fraud-detection model: a low-latency classifier scoring the same stream, handling severe class imbalance, and raising alerts — turning the descriptive monitor here into a predictive one.
