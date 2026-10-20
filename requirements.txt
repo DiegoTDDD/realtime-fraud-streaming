@@ -1,7 +1,7 @@
 # Kafka client (Redpanda speaks the Kafka protocol)
 confluent-kafka==2.5.3
 
-# Spark Structured Streaming
+# Spark Structured Streaming (3.5.8 fixes CVE-2026-32773, the History Server XSS)
 pyspark==3.5.8
 
 # Dashboard
