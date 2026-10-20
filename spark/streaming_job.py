@@ -52,7 +52,7 @@ KAFKA_BOOTSTRAP = "localhost:19092"
 TOPIC = "transactions"
 
 # Kafka connector package (Spark downloads the JAR on first run).
-KAFKA_PKG = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3"
+KAFKA_PKG = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 # Schema of the JSON payload produced by producer.py
 SCHEMA = StructType([

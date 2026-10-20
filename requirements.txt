@@ -2,7 +2,7 @@
 confluent-kafka==2.5.3
 
 # Spark Structured Streaming
-pyspark==3.5.3
+pyspark==3.5.8
 
 # Dashboard
 streamlit==1.54.0
