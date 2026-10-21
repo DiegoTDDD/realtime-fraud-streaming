@@ -186,7 +186,7 @@ fig.update_layout(
     barmode="stack", height=320, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
     margin=dict(l=10, r=10, t=10, b=10), font=dict(color=TEXT),
     xaxis=dict(gridcolor=GRID), yaxis=dict(gridcolor=GRID),
-    legend=dict(orientation="h", y=1.12, x=0),
+    legend=dict(orientation="h", y=1.12, x=0, bgcolor="rgba(0,0,0,0)", borderwidth=0, font=dict(color=TEXT, size=13)),
 )
 st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False})
 
