@@ -31,23 +31,48 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install requirements
+      - name: "README step 2: install the dependencies"
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip check
 
-      - name: Start Redpanda
-        run: docker compose up -d --wait redpanda
-
-      - name: Start the producer
+      # The next steps follow the README ("Running it") in the same order.
+      - name: "README step 3, first command: docker compose up -d (Redpanda and the console)"
         run: |
+          docker compose up -d
+          for i in $(seq 1 60); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' redpanda)" = "healthy" ]; then echo "redpanda is healthy"; break; fi
+            sleep 3
+          done
+          docker compose ps
+
+      - name: "README step 3, second command: create the topic with 3 partitions"
+        run: |
+          # The README uses "docker exec -it"; -it needs a terminal, which a CI job does not have.
+          docker exec redpanda rpk topic create transactions -p 3
+          docker exec redpanda rpk topic describe transactions | tee topic.txt
+          grep -E "PARTITIONS[[:space:]]+3" topic.txt
+
+      - name: The Redpanda Console answers on port 8080
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080 >/dev/null; then echo "console is up on port 8080"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::the Redpanda Console did not answer on port 8080"
+          docker compose logs --tail 30 console || true
+          exit 1
+
+      - name: "README step 4: start the Spark job"
+        run: nohup python spark/streaming_job.py > spark.log 2>&1 &
+
+      - name: "README step 5: start the producer"
+        run: |
+          sleep 20
           nohup python producer/producer.py > producer.log 2>&1 &
           sleep 15
           tail -3 producer.log
-
-      - name: Start the Spark job
-        run: nohup python spark/streaming_job.py > spark.log 2>&1 &
 
       - name: Wait until Spark has written real data (Bronze, then Gold)
         run: |
@@ -125,7 +150,7 @@ jobs:
           print("pipeline output ok")
           PY
 
-      - name: Dashboard opens without errors
+      - name: "README step 6: the dashboard opens without errors"
         run: |
           pip install pytest >/dev/null
           python - <<'PY'
