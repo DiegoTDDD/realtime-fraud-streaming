@@ -38,7 +38,7 @@ Fraud detection is the canonical real-time data problem: events arrive continuou
 └────────────┘     └────────────┘     └─────────────────────┘     └──────────────┘     └─────────────┘
 ```
 
-**Producer** emits ~10 transactions/second (~600/minute). Each event carries a card id, amount, merchant, category, city, and timestamp. About 1.5% are injected frauds across three classic patterns, each tagged with a ground-truth label for downstream model training.
+**Producer** emits ~10 transactions/second (~600/minute). Each event carries a card id, amount, merchant, category, city, and timestamp. About 2% of new transactions start an injected fraud, across three classic patterns, each tagged with a ground-truth label for downstream model training. A card-testing episode adds a burst of 5–12 extra probe charges, so roughly 7% of all events end up labelled as fraud.
 
 **Redpanda** is a Kafka-API-compatible broker running as a single container (no ZooKeeper). Events land on the `transactions` topic, keyed by card id so all activity for a card preserves order within a partition.
 
@@ -56,7 +56,7 @@ Fraud detection is the canonical real-time data problem: events arrive continuou
 |---|---|---|
 | **High amount** | A single charge far above the category norm | Spikes in the high-amount series |
 | **Card testing** | A burst of small "probe" charges on one card in seconds | Clusters in the card-testing series; the dominant pattern by volume |
-| **Impossible travel** | The same card transacting in distant cities minutes apart | Steady low-rate background in the impossible-travel series |
+| **Impossible travel** | A charge in a city other than the card's home city (ordinary purchases happen away from home too, 15% of the time) | Steady low-rate background in the impossible-travel series |
 
 Card testing arrives in bursts, so it dominates the per-minute fraud counts even though high-amount and impossible-travel are seeded at similar base rates. The dashboard's stacked fraud chart makes this behavior visible at a glance.
 
@@ -126,6 +126,8 @@ Card testing arrives in bursts, so it dominates the per-minute fraud counts even
    ```bash
    python spark/streaming_job.py
    ```
+   The first run downloads the Spark–Kafka connector from Maven, so it needs internet access (it is cached afterwards).
+   The connector version in `spark/streaming_job.py` (`KAFKA_PKG`) must match the PySpark version in `requirements.txt` (3.5.8).
 
 5. **Start the producer** (terminal 2)
    ```bash
@@ -159,6 +161,7 @@ realtime-fraud-streaming/
 │   ├── gold/                 # windowed aggregates (gitignored)
 │   └── gold_sample/          # small sample for the deployed dashboard
 ├── docs/screenshots/
+├── .github/                  # CI: pipeline check, dashboard check, security audit, app health
 ├── requirements.txt          # full local pipeline dependencies
 └── .gitignore
 ```
