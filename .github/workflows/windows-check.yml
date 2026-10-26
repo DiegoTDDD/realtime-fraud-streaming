@@ -1,0 +1,166 @@
+name: Windows check
+
+# Runs the README on a real Windows machine, with Git Bash and conda as the README says: conda environment,
+# Java 17, the Hadoop native binaries in C:\hadoop\bin, the Spark job and the producer. A GitHub Windows
+# machine cannot run Linux containers, so the broker here is Apache Kafka (it speaks the same protocol as
+# Redpanda and listens on the same port, 19092). Runs when this file changes, every month and on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 1 * *"
+  push:
+    paths:
+      - ".github/workflows/windows-check.yml"
+
+permissions:
+  contents: read
+  actions: write   # only used to keep the monthly schedule enabled (see last step)
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-activate-base: false
+
+      - name: "README step 1: conda environment with Python 3.11 and Java 17"
+        run: |
+          conda create -n fraud python=3.11 -y
+          conda activate fraud
+          conda install -c conda-forge openjdk=17 -y
+          java -version
+
+      - name: "README step 2: install the dependencies"
+        run: |
+          conda activate fraud
+          pip install -r requirements.txt
+
+      - name: "README, Windows only: Hadoop native binaries in C:\\hadoop\\bin"
+        run: |
+          mkdir -p /c/hadoop/bin
+          base=https://raw.githubusercontent.com/cdarlint/winutils/master/hadoop-3.3.5/bin
+          curl -fsSL -o /c/hadoop/bin/winutils.exe "$base/winutils.exe"
+          curl -fsSL -o /c/hadoop/bin/hadoop.dll "$base/hadoop.dll"
+          ls -la /c/hadoop/bin
+
+      - name: "README step 3 (adapted): start a Kafka broker on port 19092 and create the topic with 3 partitions"
+        run: |
+          conda activate fraud
+          curl -fsSL -o kafka.tgz https://archive.apache.org/dist/kafka/3.7.1/kafka_2.13-3.7.1.tgz
+          tar -xzf kafka.tgz
+          cd kafka_2.13-3.7.1
+          cat > config/kraft/windows-test.properties <<'PROPS'
+          process.roles=broker,controller
+          node.id=1
+          controller.quorum.voters=1@localhost:19093
+          listeners=PLAINTEXT://localhost:19092,CONTROLLER://localhost:19093
+          advertised.listeners=PLAINTEXT://localhost:19092
+          controller.listener.names=CONTROLLER
+          inter.broker.listener.name=PLAINTEXT
+          listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          log.dirs=C:/kafka-logs
+          num.partitions=3
+          offsets.topic.replication.factor=1
+          transaction.state.log.replication.factor=1
+          transaction.state.log.min.isr=1
+          PROPS
+          id=$(cmd.exe //c "bin\\windows\\kafka-storage.bat random-uuid" | tr -d '\r' | tail -1)
+          cmd.exe //c "bin\\windows\\kafka-storage.bat format -t $id -c config\\kraft\\windows-test.properties"
+          nohup cmd.exe //c "bin\\windows\\kafka-server-start.bat config\\kraft\\windows-test.properties" > ../kafka.log 2>&1 &
+          for i in $(seq 1 40); do
+            if cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --list" >/dev/null 2>&1; then echo "broker is up"; break; fi
+            sleep 3
+          done
+          cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --create --topic transactions --partitions 3"
+          cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --describe --topic transactions" | tee ../topic.txt
+          grep -q "PartitionCount: 3" ../topic.txt
+
+      - name: "README step 4: python spark/streaming_job.py"
+        run: |
+          conda activate fraud
+          nohup python spark/streaming_job.py > spark.log 2>&1 &
+          sleep 20
+
+      - name: "README step 5: python producer/producer.py"
+        run: |
+          conda activate fraud
+          nohup python producer/producer.py > producer.log 2>&1 &
+          sleep 15
+          tail -3 producer.log
+
+      - name: Wait until Spark has written real data on Windows (Bronze, then Gold)
+        run: |
+          conda activate fraud
+          python - <<'PY'
+          import glob, subprocess, sys, time
+          def rows(path):
+              n = 0
+              for f in glob.glob(path + "/*.parquet"):
+                  r = subprocess.run([sys.executable, "-c",
+                                      "import pyarrow.parquet as pq, sys; print(pq.read_metadata(sys.argv[1]).num_rows)", f],
+                                     capture_output=True, text=True)
+                  if r.returncode == 0:
+                      n += int(r.stdout.strip())
+              return n
+          def wait(path, minimum, seconds, label):
+              start = time.time()
+              while time.time() - start < seconds:
+                  n = rows(path)
+                  if n >= minimum:
+                      print(f"{label}: {n} rows after {int(time.time() - start)}s")
+                      return
+                  time.sleep(5)
+              print(f"::error::{label}: only {rows(path)} rows after {seconds}s (needed {minimum})")
+              sys.exit(1)
+          wait("data/bronze", 500, 420, "bronze")
+          wait("data/gold", 1, 600, "gold windows")
+          PY
+
+      - name: Stop Spark and the producer, then check the output
+        run: |
+          conda activate fraud
+          taskkill //F //IM java.exe || true
+          taskkill //F //IM python.exe || true
+          sleep 5
+          python - <<'PY'
+          import glob, sys
+          import pandas as pd
+          def read_all(path):
+              parts = []
+              for f in sorted(glob.glob(path + "/*.parquet")):
+                  try:
+                      parts.append(pd.read_parquet(f))
+                  except Exception:
+                      pass
+              return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+          b = read_all("data/bronze")
+          g = read_all("data/gold")
+          print("bronze rows:", len(b), "| gold rows:", len(g), "| gold columns:", list(g.columns))
+          need_b = {"transaction_id", "amount", "is_fraud", "event_time"}
+          need_g = {"window_start", "tx_count", "total_amount", "fraud_total"}
+          if not need_b <= set(b.columns) or not need_g <= set(g.columns) or len(b) < 500 or g["tx_count"].sum() <= 0:
+              print(f"::error::unexpected output: bronze={list(b.columns)} gold={list(g.columns)}")
+              sys.exit(1)
+          print("Windows pipeline output ok")
+          PY
+
+      - name: Show the logs on failure
+        if: failure()
+        run: |
+          tail -40 spark.log || true
+          tail -20 producer.log || true
+          tail -40 kafka.log || true
+
+      - name: Keep the monthly schedule enabled
+        if: ${{ always() && github.event_name == 'schedule' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/windows-check.yml/enable"
