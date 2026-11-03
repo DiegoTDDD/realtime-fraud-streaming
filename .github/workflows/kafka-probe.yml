@@ -1,0 +1,75 @@
+name: Kafka probe (Windows)
+
+# Temporary diagnostic: starts Apache Kafka on a Windows machine step by step and prints what every command
+# printed, so the Windows check can be fixed without guessing. It is removed once the Windows check passes.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/kafka-probe.yml"
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download and extract Kafka
+        run: |
+          curl -fsSL -o kafka.tgz https://archive.apache.org/dist/kafka/3.7.1/kafka_2.13-3.7.1.tgz; code=$?
+          echo "::notice::curl exit=$code size=$(stat -c %s kafka.tgz 2>/dev/null)"
+          tar -xzf kafka.tgz; code=$?
+          echo "::notice::tar exit=$code | $(ls kafka_2.13-3.7.1 2>&1 | tr '\n' ' ') | bat files: $(ls kafka_2.13-3.7.1/bin/windows 2>&1 | head -5 | tr '\n' ' ')"
+          echo "::notice::java: $(java -version 2>&1 | head -1) | JAVA_HOME=$JAVA_HOME"
+
+      - name: random-uuid and format
+        run: |
+          cd kafka_2.13-3.7.1
+          out=$(cmd.exe //c "bin\\windows\\kafka-storage.bat random-uuid" 2>&1); code=$?
+          echo "::notice::random-uuid exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
+          id=$(echo "$out" | tr -d '\r' | tail -1)
+          cat > config/kraft/windows-test.properties <<'PROPS'
+          process.roles=broker,controller
+          node.id=1
+          controller.quorum.voters=1@localhost:19093
+          listeners=PLAINTEXT://localhost:19092,CONTROLLER://localhost:19093
+          advertised.listeners=PLAINTEXT://localhost:19092
+          controller.listener.names=CONTROLLER
+          inter.broker.listener.name=PLAINTEXT
+          listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          log.dirs=C:/kafka-logs
+          num.partitions=3
+          offsets.topic.replication.factor=1
+          transaction.state.log.replication.factor=1
+          transaction.state.log.min.isr=1
+          PROPS
+          out=$(cmd.exe //c "bin\\windows\\kafka-storage.bat format -t $id -c config\\kraft\\windows-test.properties" 2>&1); code=$?
+          echo "::notice::format exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-700)"
+
+      - name: Start the broker, create the topic
+        run: |
+          cd kafka_2.13-3.7.1
+          nohup cmd.exe //c "bin\\windows\\kafka-server-start.bat config\\kraft\\windows-test.properties" > ../kafka.log 2>&1 &
+          up=0
+          for i in $(seq 1 30); do
+            out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --list" 2>&1); code=$?
+            if [ $code -eq 0 ]; then up=1; echo "::notice::broker answered after about $((i*3))s"; break; fi
+            sleep 3
+          done
+          echo "::notice::last topics --list exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
+          echo "::notice::kafka.log tail: $(tail -25 ../kafka.log | tr -d '\r' | tr '\n' '|' | cut -c1-1500)"
+          if [ "$up" = "1" ]; then
+            out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --create --topic transactions --partitions 3" 2>&1); code=$?
+            echo "::notice::create exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
+            out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --describe --topic transactions" 2>&1); code=$?
+            echo "::notice::describe exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-700)"
+          else
+            exit 1
+          fi
