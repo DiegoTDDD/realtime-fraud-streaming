@@ -21,17 +21,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Download and extract Kafka
+      - name: Download and extract Kafka into the SHORT path C:\k
         run: |
-          curl -fsSL -o kafka.tgz https://archive.apache.org/dist/kafka/3.7.1/kafka_2.13-3.7.1.tgz; code=$?
-          echo "::notice::curl exit=$code size=$(stat -c %s kafka.tgz 2>/dev/null)"
-          tar -xzf kafka.tgz; code=$?
-          echo "::notice::tar exit=$code | $(ls kafka_2.13-3.7.1 2>&1 | tr '\n' ' ') | bat files: $(ls kafka_2.13-3.7.1/bin/windows 2>&1 | head -5 | tr '\n' ' ')"
+          set +e
+          curl -fsSL -o kafka.tgz https://archive.apache.org/dist/kafka/3.7.1/kafka_2.13-3.7.1.tgz
+          echo "::notice::curl exit=$? size=$(stat -c %s kafka.tgz 2>/dev/null)"
+          mkdir -p /c/k
+          tar -xzf kafka.tgz -C /c/k --strip-components=1
+          echo "::notice::tar exit=$? | $(ls /c/k | tr '\n' ' ')"
           echo "::notice::java: $(java -version 2>&1 | head -1) | JAVA_HOME=$JAVA_HOME"
 
       - name: random-uuid and format
         run: |
-          cd kafka_2.13-3.7.1
+          set +e
+          cd /c/k
           out=$(cmd.exe //c "bin\\windows\\kafka-storage.bat random-uuid" 2>&1); code=$?
           echo "::notice::random-uuid exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
           id=$(echo "$out" | tr -d '\r' | tail -1)
@@ -52,11 +55,13 @@ jobs:
           PROPS
           out=$(cmd.exe //c "bin\\windows\\kafka-storage.bat format -t $id -c config\\kraft\\windows-test.properties" 2>&1); code=$?
           echo "::notice::format exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-700)"
+          [ $code -eq 0 ] || exit 1
 
       - name: Start the broker, create the topic
         run: |
-          cd kafka_2.13-3.7.1
-          nohup cmd.exe //c "bin\\windows\\kafka-server-start.bat config\\kraft\\windows-test.properties" > ../kafka.log 2>&1 &
+          set +e
+          cd /c/k
+          nohup cmd.exe //c "bin\\windows\\kafka-server-start.bat config\\kraft\\windows-test.properties" > /c/kafka.log 2>&1 &
           up=0
           for i in $(seq 1 30); do
             out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --list" 2>&1); code=$?
@@ -64,7 +69,7 @@ jobs:
             sleep 3
           done
           echo "::notice::last topics --list exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
-          echo "::notice::kafka.log tail: $(tail -25 ../kafka.log | tr -d '\r' | tr '\n' '|' | cut -c1-1500)"
+          echo "::notice::kafka.log tail: $(tail -25 /c/kafka.log | tr -d '\r' | tr '\n' '|' | cut -c1-1500)"
           if [ "$up" = "1" ]; then
             out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --create --topic transactions --partitions 3" 2>&1); code=$?
             echo "::notice::create exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
