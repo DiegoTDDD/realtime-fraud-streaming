@@ -75,18 +75,22 @@ jobs:
           cd /c/k
           nohup cmd.exe //c "bin\\windows\\kafka-server-start.bat config\\kraft\\windows-test.properties" > /c/kafka.log 2>&1 &
           up=0
-          for i in $(seq 1 30); do
-            out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --list" 2>&1); code=$?
-            if [ $code -eq 0 ]; then up=1; echo "::notice::broker answered after about $((i*3))s"; break; fi
+          for i in $(seq 1 60); do
+            # the Kafka .bat tools always exit with 0 on Windows, so readiness is the TCP port itself:
+            # curl code 7 (refused) or 28 (timeout) means closed; anything else means something answered
+            curl -s --connect-timeout 2 -m 3 http://127.0.0.1:19092 >/dev/null 2>&1; c=$?
+            if [ $c -ne 7 ] && [ $c -ne 28 ] && [ $c -ne 6 ]; then up=1; echo "broker port 19092 is open after about $((i*3))s (curl code $c)"; break; fi
             sleep 3
           done
-          echo "::notice::last topics --list exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
-          echo "::notice::kafka.log tail: $(tail -25 /c/kafka.log | tr -d '\r' | tr '\n' '|' | cut -c1-1500)"
-          if [ "$up" = "1" ]; then
-            out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --create --topic transactions --partitions 3" 2>&1); code=$?
-            echo "::notice::create exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-500)"
-            out=$(cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --describe --topic transactions" 2>&1); code=$?
-            echo "::notice::describe exit=$code out=$(echo "$out" | tr -d '\r' | tr '\n' '|' | cut -c1-700)"
-          else
+          if [ "$up" != "1" ]; then
+            echo "::error::the Kafka broker did not open port 19092: $(tail -25 /c/kafka.log | tr -d '\r' | tr '\n' '|' | cut -c1-1500)"
             exit 1
           fi
+          sleep 8
+          cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --create --topic transactions --partitions 3" > /c/topic-create.log 2>&1
+          cat /c/topic-create.log
+          grep -q "Created topic" /c/topic-create.log || {
+            echo "::error::topic creation failed: $(tail -8 /c/topic-create.log | tr -d '\r' | tr '\n' '|' | cut -c1-900) || broker log: $(tail -15 /c/kafka.log | tr -d '\r' | tr '\n' '|' | cut -c1-900)"; exit 1; }
+          cmd.exe //c "bin\\windows\\kafka-topics.bat --bootstrap-server localhost:19092 --describe --topic transactions" | tee /c/topic.txt
+          grep -q "PartitionCount: 3\|PartitionCount:3" /c/topic.txt
+          echo "::notice::topic ok: $(cat /c/topic.txt | tr -d '\r' | tr '\n' '|' | cut -c1-600)"
