@@ -1,0 +1,8 @@
+# Unit tests (tests/): the contract, the producer and the Spark transformations on a
+# local SparkSession. Java 17 must be installed. No Kafka or Docker needed.
+pytest==9.2.0
+pyspark==3.5.8
+pandas==2.2.3
+pyarrow==23.0.1
+confluent-kafka==2.5.3
+faker==30.3.0

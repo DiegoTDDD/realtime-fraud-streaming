@@ -1,0 +1,40 @@
+name: Tests
+
+# Lint and unit tests on every push and pull request: the event contract, the
+# producer's events against it, and the Spark transformations (parsing, contract
+# check, quarantine, Gold windows) on a local SparkSession. No Kafka or Docker.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Run unit tests
+        run: pytest

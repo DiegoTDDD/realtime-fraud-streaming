@@ -1,15 +1,18 @@
 """
 Spark Structured Streaming job for real-time fraud analytics.
 
-Reads card transactions from a Redpanda (Kafka) topic and runs two streaming
-queries:
+Reads card transactions from a Redpanda (Kafka) topic and runs three queries:
 
-  1. Bronze  - persists every raw transaction to Parquet (faithful landing
-               zone, the training source for a downstream ML model).
-  2. Gold    - tumbling 1-minute windowed aggregations with a 2-minute
-               watermark: transaction counts, total/avg amount, and counts
-               of each detected fraud pattern. Written to Parquet and echoed
-               to the console as windows close.
+  1. Bronze      - every transaction as received, typed, in Parquet (the
+                   faithful landing zone).
+  2. Quarantine  - events that break the contract (contract/transaction.py),
+                   with the original message and the reasons, in Parquet.
+  3. Gold        - 1-minute tumbling windows with a 2-minute watermark over the
+                   valid events: transaction counts, total/average amount and
+                   counts of each fraud pattern. Written to Parquet and echoed
+                   to the console as windows close.
+
+The transformations live in spark/transforms.py, where they are unit-tested.
 
 Run (inside the `fraud` conda env, with Redpanda up):
     python spark/streaming_job.py
@@ -17,8 +20,10 @@ Run (inside the `fraud` conda env, with Redpanda up):
 Stop with Ctrl+C.
 """
 
+import logging
 import os
 import platform
+import sys
 
 # ---------------------------------------------------------------------------
 # Windows Hadoop shim: Spark needs winutils.exe + hadoop.dll to write files
@@ -30,22 +35,29 @@ if platform.system() == "Windows":
     os.environ.setdefault("HADOOP_HOME", hadoop_home)
     os.environ["PATH"] = os.path.join(hadoop_home, "bin") + os.pathsep + os.environ.get("PATH", "")
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, from_json, to_timestamp, window,
-    count, sum as _sum, avg, when,
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)  # for the shared contract package
+
+from pyspark.sql import DataFrame, SparkSession  # noqa: E402
+from pyspark.sql.streaming import StreamingQuery  # noqa: E402
+
+from spark.transforms import (  # noqa: E402
+    gold_windows,
+    invalid_events,
+    parse_events,
+    valid_events,
+    with_violations,
 )
-from pyspark.sql.types import (
-    StructType, StructField, StringType, DoubleType, BooleanType,
-)
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Paths & config
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 BRONZE_DIR = os.path.join(DATA_DIR, "bronze")
 GOLD_DIR = os.path.join(DATA_DIR, "gold")
+QUARANTINE_DIR = os.path.join(DATA_DIR, "quarantine")
 CHECKPOINT_DIR = os.path.join(DATA_DIR, "_checkpoints")
 
 KAFKA_BOOTSTRAP = "localhost:19092"
@@ -54,24 +66,10 @@ TOPIC = "transactions"
 # Kafka connector package (Spark downloads the JAR on first run).
 KAFKA_PKG = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
-# Schema of the JSON payload produced by producer.py
-SCHEMA = StructType([
-    StructField("transaction_id", StringType()),
-    StructField("card_id", StringType()),
-    StructField("amount", DoubleType()),
-    StructField("merchant", StringType()),
-    StructField("category", StringType()),
-    StructField("city", StringType()),
-    StructField("timestamp", StringType()),
-    StructField("is_fraud", BooleanType()),
-    StructField("fraud_type", StringType()),
-])
-
 
 def build_spark() -> SparkSession:
     return (
-        SparkSession.builder
-        .appName("realtime-fraud-streaming")
+        SparkSession.builder.appName("realtime-fraud-streaming")
         .config("spark.jars.packages", KAFKA_PKG)
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.sql.session.timeZone", "UTC")
@@ -79,83 +77,47 @@ def build_spark() -> SparkSession:
     )
 
 
-def main():
+def write_parquet(df: DataFrame, name: str, path: str) -> StreamingQuery:
+    return (
+        df.writeStream.format("parquet")
+        .option("path", path)
+        .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, name))
+        .outputMode("append")
+        .queryName(name)
+        .start()
+    )
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
 
-    # ----- Source: read the stream from Redpanda --------------------------
     raw = (
-        spark.readStream
-        .format("kafka")
+        spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", TOPIC)
         .option("startingOffsets", "earliest")
         .load()
     )
+    checked = with_violations(parse_events(raw))
 
-    # Kafka value is bytes -> string -> parsed JSON columns.
-    parsed = (
-        raw.select(from_json(col("value").cast("string"), SCHEMA).alias("t"))
-        .select("t.*")
-        .withColumn("event_time", to_timestamp(col("timestamp")))
-    )
+    write_parquet(checked.drop("raw_value", "violations"), "bronze", BRONZE_DIR)
+    write_parquet(invalid_events(checked), "quarantine", QUARANTINE_DIR)
 
-    # ----- Bronze: persist raw transactions -------------------------------
-    bronze_query = (
-        parsed.writeStream
-        .format("parquet")
-        .option("path", BRONZE_DIR)
-        .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "bronze"))
-        .outputMode("append")
-        .queryName("bronze_raw")
-        .start()
-    )
-
-    # ----- Gold: 1-minute windowed aggregations with watermark ------------
-    gold = (
-        parsed
-        .withWatermark("event_time", "2 minutes")
-        .groupBy(window(col("event_time"), "1 minute"))
-        .agg(
-            count("*").alias("tx_count"),
-            _sum("amount").alias("total_amount"),
-            avg("amount").alias("avg_amount"),
-            _sum(when(col("fraud_type") == "high_amount", 1).otherwise(0)).alias("fraud_high_amount"),
-            _sum(when(col("fraud_type") == "card_testing", 1).otherwise(0)).alias("fraud_card_testing"),
-            _sum(when(col("fraud_type") == "impossible_travel", 1).otherwise(0)).alias("fraud_impossible_travel"),
-            _sum(when(col("is_fraud"), 1).otherwise(0)).alias("fraud_total"),
-        )
-        .select(
-            col("window.start").alias("window_start"),
-            col("window.end").alias("window_end"),
-            "tx_count", "total_amount", "avg_amount",
-            "fraud_high_amount", "fraud_card_testing",
-            "fraud_impossible_travel", "fraud_total",
-        )
-    )
-
-    # Write Gold to Parquet (append; complete mode can't write Parquet).
-    gold_query = (
-        gold.writeStream
-        .format("parquet")
-        .option("path", GOLD_DIR)
-        .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "gold"))
-        .outputMode("append")
-        .queryName("gold_windows")
-        .start()
-    )
-
+    # Gold: append mode, because Parquet cannot be written in complete mode.
+    gold = gold_windows(valid_events(checked))
+    write_parquet(gold, "gold", GOLD_DIR)
     # Also echo closed windows to the console for live visibility.
-    console_query = (
-        gold.writeStream
-        .format("console")
+    (
+        gold.writeStream.format("console")
         .option("truncate", "false")
         .outputMode("append")
         .queryName("gold_console")
         .start()
     )
 
-    print("Streaming started. Bronze + Gold running. Ctrl+C to stop.")
+    log.info("Streaming started. Bronze, quarantine and Gold running. Ctrl+C to stop.")
     spark.streams.awaitAnyTermination()
 
 

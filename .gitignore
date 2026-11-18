@@ -10,6 +10,7 @@ venv/
 
 # Data — heavy streaming output, never version raw/full layers
 data/bronze/
+data/quarantine/
 data/gold/
 data/_checkpoints/
 data/_spark_metadata/

@@ -11,6 +11,7 @@ Run (inside the `fraud` conda env, after stopping the streaming job):
 """
 
 import glob
+import logging
 import os
 
 import pandas as pd
@@ -20,8 +21,11 @@ GOLD_DIR = os.path.join(PROJECT_ROOT, "data", "gold")
 SAMPLE_DIR = os.path.join(PROJECT_ROOT, "data", "gold_sample")
 SAMPLE_PATH = os.path.join(SAMPLE_DIR, "windows.parquet")
 
+log = logging.getLogger(__name__)
 
-def main():
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     files = glob.glob(os.path.join(GOLD_DIR, "*.parquet"))
     if not files:
         raise SystemExit("No Gold parquet files found. Run the pipeline first.")
@@ -34,8 +38,12 @@ def main():
     os.makedirs(SAMPLE_DIR, exist_ok=True)
     df.to_parquet(SAMPLE_PATH, index=False)
 
-    print(f"Wrote {len(df)} windows to {SAMPLE_PATH}")
-    print(f"File size: {os.path.getsize(SAMPLE_PATH) / 1024:.1f} KB")
+    log.info(
+        "Wrote %d windows to %s (%.1f KB)",
+        len(df),
+        SAMPLE_PATH,
+        os.path.getsize(SAMPLE_PATH) / 1024,
+    )
 
 
 if __name__ == "__main__":

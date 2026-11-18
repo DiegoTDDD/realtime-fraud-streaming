@@ -8,27 +8,41 @@ travel). Each event carries a ground-truth label (`is_fraud`, `fraud_type`)
 so a downstream ML model (Project 6) can be trained and evaluated, while the
 streaming layer detects fraud purely from behavioral patterns.
 
+Every event is checked against the shared contract (contract/transaction.py)
+before it is sent; an event that breaks it is logged and dropped, so a bug in
+the generator never reaches the topic.
+
 Usage:
     python producer/producer.py
 Stop with Ctrl+C.
 """
 
 import json
+import logging
+import os
 import random
+import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
-from confluent_kafka import Producer
+from confluent_kafka import KafkaError, Message, Producer
 from faker import Faker
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from contract.transaction import validate_event  # noqa: E402
+
+log = logging.getLogger(__name__)
+Transaction = dict[str, Any]
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BOOTSTRAP_SERVERS = "localhost:19092"   # Redpanda OUTSIDE listener
+BOOTSTRAP_SERVERS = "localhost:19092"  # Redpanda OUTSIDE listener
 TOPIC = "transactions"
-EVENTS_PER_SECOND = 10                   # base throughput
-FRAUD_RATE = 0.02                        # ~2% of events are fraudulent
+EVENTS_PER_SECOND = 10  # base throughput
+FRAUD_RATE = 0.02  # ~2% of events are fraudulent
 
 fake = Faker()
 random.seed(42)
@@ -38,8 +52,16 @@ Faker.seed(42)
 # transactions usually happen in or near the home city; impossible-travel
 # fraud deliberately violates this.
 CITIES = [
-    "Sao Paulo", "Rio de Janeiro", "Belo Horizonte", "Curitiba",
-    "Porto Alegre", "Salvador", "Recife", "Fortaleza", "Brasilia", "Manaus",
+    "Sao Paulo",
+    "Rio de Janeiro",
+    "Belo Horizonte",
+    "Curitiba",
+    "Porto Alegre",
+    "Salvador",
+    "Recife",
+    "Fortaleza",
+    "Brasilia",
+    "Manaus",
 ]
 
 CATEGORIES = {
@@ -66,13 +88,13 @@ CARDS = [
 _active_bursts: dict[str, int] = {}
 
 
-def delivery_report(err, msg):
+def delivery_report(err: KafkaError | None, msg: Message) -> None:
     """Called once per message to report success or failure."""
     if err is not None:
-        print(f"  ! delivery failed: {err}")
+        log.error("delivery failed: %s", err)
 
 
-def make_legit_transaction() -> dict:
+def make_legit_transaction() -> Transaction:
     card = random.choice(CARDS)
     category = random.choice(list(CATEGORIES.keys()))
     low, high = CATEGORIES[category]
@@ -86,54 +108,60 @@ def make_legit_transaction() -> dict:
         "merchant": fake.company(),
         "category": category,
         "city": city,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "is_fraud": False,
         "fraud_type": None,
     }
 
 
-def make_fraud_transaction() -> dict:
+def make_fraud_transaction() -> Transaction:
     """Produce one of three classic fraud patterns."""
     fraud_type = random.choice(["high_amount", "card_testing", "impossible_travel"])
     card = random.choice(CARDS)
-    base = {
+    base: Transaction = {
         "transaction_id": str(uuid.uuid4()),
         "card_id": card["card_id"],
         "merchant": fake.company(),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "is_fraud": True,
         "fraud_type": fraud_type,
     }
 
     if fraud_type == "high_amount":
         category = random.choice(list(CATEGORIES.keys()))
-        base.update({
-            "amount": round(random.uniform(5000, 15000), 2),
-            "category": category,
-            "city": card["home_city"],
-        })
+        base.update(
+            {
+                "amount": round(random.uniform(5000, 15000), 2),
+                "category": category,
+                "city": card["home_city"],
+            }
+        )
 
     elif fraud_type == "card_testing":
         # Small "probe" charge; also schedule a burst of follow-ups.
         _active_bursts[card["card_id"]] = random.randint(5, 12)
-        base.update({
-            "amount": round(random.uniform(0.5, 5.0), 2),
-            "category": "entertainment",
-            "city": card["home_city"],
-        })
+        base.update(
+            {
+                "amount": round(random.uniform(0.5, 5.0), 2),
+                "category": "entertainment",
+                "city": card["home_city"],
+            }
+        )
 
     else:  # impossible_travel
         far_city = random.choice([c for c in CITIES if c != card["home_city"]])
-        base.update({
-            "amount": round(random.uniform(100, 1500), 2),
-            "category": random.choice(list(CATEGORIES.keys())),
-            "city": far_city,
-        })
+        base.update(
+            {
+                "amount": round(random.uniform(100, 1500), 2),
+                "category": random.choice(list(CATEGORIES.keys())),
+                "city": far_city,
+            }
+        )
 
     return base
 
 
-def make_burst_transaction(card_id: str) -> dict:
+def make_burst_transaction(card_id: str) -> Transaction:
     """Follow-up probe charge for an ongoing card-testing burst."""
     return {
         "transaction_id": str(uuid.uuid4()),
@@ -142,13 +170,13 @@ def make_burst_transaction(card_id: str) -> dict:
         "merchant": fake.company(),
         "category": "entertainment",
         "city": random.choice(CITIES),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "is_fraud": True,
         "fraud_type": "card_testing",
     }
 
 
-def next_transaction() -> dict:
+def next_transaction() -> Transaction:
     # Drain any active card-testing bursts first.
     if _active_bursts:
         card_id = next(iter(_active_bursts))
@@ -162,15 +190,20 @@ def next_transaction() -> dict:
     return make_legit_transaction()
 
 
-def main():
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
     interval = 1.0 / EVENTS_PER_SECOND
     sent = 0
     frauds = 0
-    print(f"Producing to '{TOPIC}' at ~{EVENTS_PER_SECOND}/s. Ctrl+C to stop.")
+    log.info("Producing to '%s' at ~%d/s. Ctrl+C to stop.", TOPIC, EVENTS_PER_SECOND)
     try:
         while True:
             tx = next_transaction()
+            problems = validate_event(tx)
+            if problems:
+                log.error("dropped an event that breaks the contract %s: %s", problems, tx)
+                continue
             # Key by card_id so all events for a card land in the same
             # partition (preserves per-card ordering for the consumer).
             producer.produce(
@@ -184,10 +217,10 @@ def main():
             if tx["is_fraud"]:
                 frauds += 1
             if sent % 50 == 0:
-                print(f"  sent={sent}  frauds={frauds}  ({frauds/sent:.1%})")
+                log.info("  sent=%d  frauds=%d  (%.1f%%)", sent, frauds, 100 * frauds / sent)
             time.sleep(interval)
     except KeyboardInterrupt:
-        print(f"\nStopping. Flushing... total sent={sent}, frauds={frauds}")
+        log.info("Stopping. Flushing... total sent=%d, frauds=%d", sent, frauds)
         producer.flush(10)
 
 
