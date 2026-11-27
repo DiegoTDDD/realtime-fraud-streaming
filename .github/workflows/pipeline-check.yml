@@ -90,6 +90,14 @@ jobs:
           fi
           python contract/registry.py check contract/transactions-value.schema.json
 
+      - name: Download the Spark jars (retried; cached for the next run)
+        run: |
+          for i in 1 2 3; do
+            python -c "from spark.session import build_spark; build_spark('prefetch', master='local[1]', kafka=True).stop()" && exit 0
+            echo "jar download failed (attempt $i), retrying"; sleep 30
+          done
+          exit 1
+
       - name: "README step 5: start the Spark job"
         run: nohup python spark/streaming_job.py > spark.log 2>&1 &
 

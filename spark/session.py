@@ -11,6 +11,9 @@ from pyspark.sql import SparkSession
 KAFKA_PKG = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 
+MAVEN_MIRROR = "https://maven-central.storage-download.googleapis.com/maven2/"
+
+
 def build_spark(
     app: str, *, master: str | None = None, kafka: bool = False, conf: dict | None = None
 ) -> SparkSession:
@@ -26,6 +29,9 @@ def build_spark(
         .config("spark.sql.shuffle.partitions", "4")
         # VACUUM refuses retention under 7 days unless this is off; keep the check on.
         .config("spark.databricks.delta.retentionDurationCheck.enabled", "true")
+        # Maven Central has refused CI downloads of the Kafka and Delta jars; Google's mirror
+        # of Central is tried as well.
+        .config("spark.jars.repositories", MAVEN_MIRROR)
     )
     if master:
         builder = builder.master(master)
