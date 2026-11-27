@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 # field -> Python type(s) accepted; order matches the producer's JSON and the Spark schema
@@ -79,3 +80,45 @@ def validate_event(event: Mapping[str, Any]) -> list[str]:
     if isinstance(is_fraud, bool) and is_fraud != (fraud_type is not None):
         reasons.append("label_mismatch")
     return reasons
+
+
+# ---------------------------------------------------------------------------
+# JSON Schema for the schema registry (ADR 0008)
+# ---------------------------------------------------------------------------
+SUBJECT = "transactions-value"  # TopicNameStrategy: <topic>-value
+SCHEMA_PATH = Path(__file__).with_name("transactions-value.schema.json")
+_JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
+
+
+def json_schema() -> dict[str, Any]:
+    """The topic's value schema, derived from FIELDS, REQUIRED and FRAUD_TYPES.
+
+    It encodes what a schema can say (fields, types, required, allowed fraud types, positive
+    amount). The cross-field rule (label_mismatch) stays in validate_event and in Spark.
+    tests/test_schema.py fails if the committed file differs from this.
+    """
+    properties: dict[str, Any] = {}
+    for name, types in FIELDS.items():
+        json_types = sorted({_JSON_TYPES[t] for t in types})
+        if set(json_types) == {"integer", "number"}:
+            json_types = ["number"]
+        spec: dict[str, Any] = {"type": json_types[0] if len(json_types) == 1 else json_types}
+        if name in OPTIONAL:
+            spec["type"] = [spec["type"], "null"]
+        if name == "amount":
+            spec["exclusiveMinimum"] = 0
+        if name == "timestamp":
+            spec["format"] = "date-time"
+        if name == "fraud_type":
+            spec["enum"] = [*FRAUD_TYPES, None]
+        properties[name] = spec
+    return {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "transaction",
+        "description": (
+            "A card transaction on the transactions topic. Generated from contract/transaction.py."
+        ),
+        "type": "object",
+        "properties": properties,
+        "required": list(REQUIRED),
+    }

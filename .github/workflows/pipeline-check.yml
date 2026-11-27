@@ -1,13 +1,18 @@
 name: Pipeline check
 
-# Runs the real pipeline: Redpanda (Docker) -> producer -> Spark Structured
-# Streaming (Kafka connector) -> Parquet, then opens the dashboard.
+# Runs the real pipeline: Redpanda and its schema registry (Docker) -> producer -> Spark
+# Structured Streaming -> Delta tables, then proves the claims the README makes:
+#   - the registry rejects an incompatible schema, and a message sent without it is quarantined
+#   - the health check passes while the stream runs and fails after it stops
+#   - killing the job mid-stream and restarting it loses and repeats nothing
+#   - compaction runs while the stream writes, with the same rows before and after
 on:
   push:
     paths:
       - requirements.txt
       - "spark/**"
       - "producer/**"
+      - "contract/**"
       - "dashboard/**"
       - docker-compose.yml
       - ".github/workflows/pipeline-check.yml"
@@ -17,7 +22,7 @@ jobs:
   streaming:
     name: Redpanda + Spark
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -64,93 +69,119 @@ jobs:
           docker compose logs --tail 30 console || true
           exit 1
 
-      - name: "README step 4: start the Spark job"
+      - name: "README step 4: register the event schema (BACKWARD compatibility)"
+        run: |
+          python contract/registry.py register
+          python contract/registry.py show
+
+      - name: The registry rejects an incompatible schema (amount as a string)
+        run: |
+          if python contract/registry.py check tests/fixtures/incompatible.schema.json; then
+            echo "::error::the registry accepted an incompatible schema"; exit 1
+          fi
+          python contract/registry.py check contract/transactions-value.schema.json
+
+      - name: "README step 5: start the Spark job"
         run: nohup python spark/streaming_job.py > spark.log 2>&1 &
 
-      - name: "README step 5: start the producer"
+      - name: "README step 6: start the producer"
         run: |
-          sleep 20
+          sleep 25
           nohup python producer/producer.py > producer.log 2>&1 &
           sleep 15
           tail -3 producer.log
 
+      - name: A message sent without the schema registry goes to quarantine
+        run: |
+          echo '{"transaction_id":"raw-unregistered-1","card_id":"card_0001","amount":10.0,"merchant":"m","category":"groceries","city":"Recife","timestamp":"2026-01-01T10:00:00+00:00","is_fraud":false,"fraud_type":null}' \
+            | docker exec -i redpanda rpk topic produce transactions -k card_0001
+
       - name: Wait until Spark has written real data (Bronze, then Gold)
         run: |
           python - <<'PY'
-          import glob, os, subprocess, sys, time
-          import pandas as pd
+          import subprocess, sys, time
+          from deltalake import DeltaTable
 
           def rows(path):
-              n = 0
-              for f in glob.glob(path + "/*.parquet"):
-                  if time.time() - os.path.getmtime(f) < 3:
-                      continue  # Spark may still be writing this file
-                  r = subprocess.run(
-                      [sys.executable, "-c",
-                       "import pyarrow.parquet as pq, sys; print(pq.read_metadata(sys.argv[1]).num_rows)", f],
-                      capture_output=True, text=True)
-                  if r.returncode == 0:
-                      n += int(r.stdout.strip())
-              return n
+              try:
+                  return len(DeltaTable(path).to_pandas())
+              except Exception:
+                  return 0  # the table does not exist yet
 
-          def alive(pattern):
-              return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
-
-          def wait(path, minimum, seconds, label, process):
+          def wait(path, minimum, seconds, label):
               start = time.time()
               while time.time() - start < seconds:
                   n = rows(path)
                   if n >= minimum:
                       print(f"{label}: {n} rows after {int(time.time() - start)}s")
                       return
-                  if not alive(process):
-                      print(f"::error::the Spark job stopped before {label} had data (rows so far: {n})")
-                      sys.exit(1)
+                  if subprocess.run(["pgrep", "-f", "streaming_job.py"]).returncode != 0:
+                      sys.exit(f"::error::the Spark job stopped before {label} had data")
                   time.sleep(5)
-              print(f"::error::{label}: only {rows(path)} rows after {seconds}s (needed {minimum})")
-              sys.exit(1)
+              sys.exit(f"::error::{label}: only {rows(path)} rows after {seconds}s (needed {minimum})")
 
-          wait("data/bronze", 500, 300, "bronze", "streaming_job.py")
-          wait("data/gold", 1, 480, "gold windows (need ~4 minutes of events)", "streaming_job.py")
+          wait("data/delta/bronze", 500, 300, "bronze")
+          wait("data/delta/gold", 1, 480, "gold windows (need ~4 minutes of events)")
           PY
 
-      - name: Stop Spark and the producer (so the output files are complete)
-        run: |
-          pkill -f streaming_job.py || true
-          pkill -f producer.py || true
-          sleep 5
+      - name: Health check passes while the stream runs
+        run: python spark/health.py
 
-      - name: Check the output
+      - name: Kill the Spark job mid-stream (SIGKILL, no clean shutdown) and restart it
+        run: |
+          pkill -9 -f streaming_job.py || true
+          pkill -9 -f org.apache.spark.deploy.SparkSubmit || true
+          sleep 15
+          nohup python spark/streaming_job.py > spark-restart.log 2>&1 &
+          sleep 60
+          tail -5 spark-restart.log
+
+      - name: Compaction while the stream keeps writing
+        run: python spark/maintenance.py
+
+      - name: Every Kafka record is in Bronze exactly once after the crash
+        run: |
+          pkill -f producer.py || true
+          sleep 45   # two triggers: Spark reads the last records
+          python spark/maintenance.py --skip-compaction --check-duplicates
+
+      - name: Check the output (contents, quarantine, lineage)
         run: |
           python - <<'PY'
-          import glob, sys
-          import pandas as pd
+          import sys
+          from deltalake import DeltaTable
 
-          def read_all(path):
-              parts = []
-              for f in sorted(glob.glob(path + "/*.parquet")):
-                  try:
-                      parts.append(pd.read_parquet(f))
-                  except Exception:
-                      pass  # a file cut short when Spark was stopped
-              return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-
-          b = read_all("data/bronze")
-          g = read_all("data/gold")
-          print("bronze rows:", len(b), "| columns:", list(b.columns))
-          print("gold rows:", len(g), "| columns:", list(g.columns))
-          need_b = {"transaction_id", "amount", "is_fraud", "event_time"}
+          b = DeltaTable("data/delta/bronze").to_pandas()
+          g = DeltaTable("data/delta/gold").to_pandas()
+          q = DeltaTable("data/delta/quarantine").to_pandas()
+          print("bronze rows:", len(b), "| gold windows:", len(g), "| quarantined:", len(q))
+          need_b = {"transaction_id", "amount", "is_fraud", "event_time", "kafka_partition", "kafka_offset", "schema_id"}
           need_g = {"window_start", "tx_count", "total_amount", "fraud_total"}
           if not need_b <= set(b.columns) or not need_g <= set(g.columns):
-              print(f"::error::unexpected columns. bronze={list(b.columns)} gold={list(g.columns)}")
-              sys.exit(1)
+              sys.exit(f"::error::unexpected columns. bronze={list(b.columns)} gold={list(g.columns)}")
           if len(b) < 500 or g["tx_count"].sum() <= 0:
-              print(f"::error::too little data: bronze={len(b)} rows, gold tx_count total={g['tx_count'].sum()}")
-              sys.exit(1)
+              sys.exit(f"::error::too little data: bronze={len(b)}, gold tx_count={g['tx_count'].sum()}")
+          if g["window_start"].duplicated().any():
+              sys.exit("::error::a Gold window was written twice")
+          raw = q[q["raw_value"].str.contains("raw-unregistered-1")]
+          if raw.empty or "unregistered_schema" not in list(raw.iloc[0]["violations"]):
+              sys.exit("::error::the unregistered message is not in quarantine with unregistered_schema")
+          registered = b[b["schema_id"].notna()]
+          print("schema ids in bronze:", sorted(registered["schema_id"].unique()))
           print("pipeline output ok")
           PY
 
-      - name: "README step 6: the dashboard opens without errors"
+      - name: Health check fails once the job is stopped
+        run: |
+          pkill -f streaming_job.py || true
+          sleep 100
+          if python spark/health.py > health.txt; then
+            cat health.txt; echo "::error::health passed with the job stopped"; exit 1
+          fi
+          cat health.txt
+          grep -Eq "stale progress|terminated" health.txt
+
+      - name: "README step 7: the dashboard opens without errors"
         run: |
           pip install pytest >/dev/null
           python - <<'PY'
@@ -165,6 +196,8 @@ jobs:
         run: |
           echo "--- producer"; tail -20 producer.log || true
           echo "--- spark"; tail -60 spark.log || true
+          echo "--- spark after restart"; tail -60 spark-restart.log || true
+          echo "--- progress"; tail -20 data/ops/progress.jsonl || true
           docker compose logs --tail 40 redpanda || true
 
       - name: Tear down

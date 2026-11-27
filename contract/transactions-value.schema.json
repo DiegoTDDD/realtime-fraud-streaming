@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "transaction",
+  "description": "A card transaction on the transactions topic. Generated from contract/transaction.py.",
+  "type": "object",
+  "properties": {
+    "transaction_id": {
+      "type": "string"
+    },
+    "card_id": {
+      "type": "string"
+    },
+    "amount": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "merchant": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "city": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "is_fraud": {
+      "type": "boolean"
+    },
+    "fraud_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "high_amount",
+        "card_testing",
+        "impossible_travel",
+        null
+      ]
+    }
+  },
+  "required": [
+    "transaction_id",
+    "card_id",
+    "amount",
+    "merchant",
+    "category",
+    "city",
+    "timestamp",
+    "is_fraud"
+  ]
+}

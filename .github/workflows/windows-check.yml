@@ -3,7 +3,9 @@ name: Windows check
 # Runs the README on a real Windows machine, with Git Bash and conda as the README says: conda environment,
 # Java 17, the Hadoop native binaries in C:\hadoop\bin, the Spark job and the producer. A GitHub Windows
 # machine cannot run Linux containers, so the broker here is Apache Kafka (it speaks the same protocol as
-# Redpanda and listens on the same port, 19092). Runs when this file changes, every month and on demand.
+# Redpanda and listens on the same port, 19092), and the schema registry is Confluent's community
+# Schema Registry (the API Redpanda's built-in registry implements, on the same port, 8081).
+# Runs when this file changes, every month and on demand.
 on:
   workflow_dispatch:
   schedule:
@@ -119,13 +121,43 @@ jobs:
           java -cp "$K/libs/*" org.apache.kafka.tools.TopicCommand --bootstrap-server localhost:19092 --describe --topic transactions | tee /c/topic.txt
           grep -q "PartitionCount: 3\|PartitionCount:3" /c/topic.txt
 
-      - name: "README step 4: python spark/streaming_job.py"
+      - name: "README step 4 (adapted): start a schema registry on port 8081 and register the schema"
+        run: |
+          conda activate fraud
+          dl() {
+            curl -fsSL --retry 4 --retry-all-errors --connect-timeout 30 --max-time 600 -o sr.tgz "$1" \
+              && [ "$(stat -c %s sr.tgz)" -gt 50000000 ]
+          }
+          dl https://packages.confluent.io/archive/7.7/confluent-community-7.7.1.tar.gz \
+            || { echo "::error::could not download the Confluent community package"; exit 1; }
+          mkdir -p /c/sr
+          tar -xzf sr.tgz -C /c/sr --strip-components=1 \
+            --wildcards '*/share/java/schema-registry/*' '*/share/java/confluent-common/*' \
+            '*/share/java/rest-utils/*' '*/etc/schema-registry/*'
+          cat > /c/sr/sr.properties <<'PROPS'
+          listeners=http://0.0.0.0:8081
+          kafkastore.bootstrap.servers=PLAINTEXT://localhost:19092
+          kafkastore.topic=_schemas
+          kafkastore.topic.replication.factor=1
+          PROPS
+          S=C:/sr/share/java
+          # Java is called directly, for the same reasons as Kafka above.
+          nohup java -Xmx512M -cp "$S/schema-registry/*;$S/confluent-common/*;$S/rest-utils/*" \
+            io.confluent.kafka.schemaregistry.rest.SchemaRegistryMain C:/sr/sr.properties > /c/sr.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8081/subjects >/dev/null; then echo "registry up after about $((i*3))s"; break; fi
+            sleep 3
+          done
+          curl -sf http://127.0.0.1:8081/subjects || { echo "::error::schema registry did not start: $(tail -20 /c/sr.log | tr -d '\r' | tr '\n' '|' | cut -c1-1200)"; exit 1; }
+          python contract/registry.py register
+
+      - name: "README step 5: python spark/streaming_job.py"
         run: |
           conda activate fraud
           nohup python spark/streaming_job.py > spark.log 2>&1 &
           sleep 20
 
-      - name: "README step 5: python producer/producer.py"
+      - name: "README step 6: python producer/producer.py"
         run: |
           conda activate fraud
           nohup python producer/producer.py > producer.log 2>&1 &
@@ -136,16 +168,13 @@ jobs:
         run: |
           conda activate fraud
           python - <<'PY'
-          import glob, subprocess, sys, time
+          import sys, time
+          from deltalake import DeltaTable
           def rows(path):
-              n = 0
-              for f in glob.glob(path + "/*.parquet"):
-                  r = subprocess.run([sys.executable, "-c",
-                                      "import pyarrow.parquet as pq, sys; print(pq.read_metadata(sys.argv[1]).num_rows)", f],
-                                     capture_output=True, text=True)
-                  if r.returncode == 0:
-                      n += int(r.stdout.strip())
-              return n
+              try:
+                  return len(DeltaTable(path).to_pandas())
+              except Exception:
+                  return 0
           def wait(path, minimum, seconds, label):
               start = time.time()
               while time.time() - start < seconds:
@@ -156,8 +185,8 @@ jobs:
                   time.sleep(5)
               print(f"::error::{label}: only {rows(path)} rows after {seconds}s (needed {minimum})")
               sys.exit(1)
-          wait("data/bronze", 500, 420, "bronze")
-          wait("data/gold", 1, 600, "gold windows")
+          wait("data/delta/bronze", 500, 420, "bronze")
+          wait("data/delta/gold", 1, 600, "gold windows")
           PY
 
       - name: Stop Spark and the producer, then check the output
@@ -167,23 +196,18 @@ jobs:
           taskkill //F //IM python.exe || true
           sleep 5
           python - <<'PY'
-          import glob, sys
-          import pandas as pd
-          def read_all(path):
-              parts = []
-              for f in sorted(glob.glob(path + "/*.parquet")):
-                  try:
-                      parts.append(pd.read_parquet(f))
-                  except Exception:
-                      pass
-              return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-          b = read_all("data/bronze")
-          g = read_all("data/gold")
+          import sys
+          from deltalake import DeltaTable
+          b = DeltaTable("data/delta/bronze").to_pandas()
+          g = DeltaTable("data/delta/gold").to_pandas()
           print("bronze rows:", len(b), "| gold rows:", len(g), "| gold columns:", list(g.columns))
-          need_b = {"transaction_id", "amount", "is_fraud", "event_time"}
+          need_b = {"transaction_id", "amount", "is_fraud", "event_time", "schema_id"}
           need_g = {"window_start", "tx_count", "total_amount", "fraud_total"}
           if not need_b <= set(b.columns) or not need_g <= set(g.columns) or len(b) < 500 or g["tx_count"].sum() <= 0:
               print(f"::error::unexpected output: bronze={list(b.columns)} gold={list(g.columns)}")
+              sys.exit(1)
+          if b["schema_id"].isna().all():
+              print("::error::no event carried the schema registry id")
               sys.exit(1)
           print("Windows pipeline output ok")
           PY
@@ -196,6 +220,7 @@ jobs:
           tail -40 spark.log || true
           tail -20 producer.log || true
           tail -40 /c/kafka.log || true
+          tail -40 /c/sr.log || true
 
       - name: Keep the monthly schedule enabled
         if: ${{ always() && github.event_name == 'schedule' }}

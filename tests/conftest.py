@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -42,17 +43,23 @@ def without(field: str) -> dict:
     return e
 
 
+SCHEMA_ID = 7
+
+
+def wire(payload: str, schema_id: int | None = SCHEMA_ID) -> bytes:
+    """Confluent wire format: a 0 byte, the 4-byte schema id, then the JSON. None = no header."""
+    body = payload.encode()
+    return body if schema_id is None else b"\x00" + schema_id.to_bytes(4, "big") + body
+
+
 @pytest.fixture(scope="session")
 def spark():
-    from pyspark.sql import SparkSession
+    from spark.session import build_spark
 
-    session = (
-        SparkSession.builder.master("local[1]")
-        .appName("tests")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "1")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
+    session = build_spark(
+        "tests",
+        master="local[1]",
+        conf={"spark.ui.enabled": "false", "spark.sql.shuffle.partitions": "1"},
     )
     session.sparkContext.setLogLevel("ERROR")
     yield session
@@ -61,10 +68,24 @@ def spark():
 
 @pytest.fixture
 def kafka_frame(spark):
-    """Build a DataFrame shaped like the Kafka source (binary `value`) from dicts or raw strings."""
+    """Build a DataFrame shaped like the Kafka source from dicts or raw strings.
 
-    def build(messages):
-        values = [m if isinstance(m, str) else json.dumps(m) for m in messages]
-        return spark.createDataFrame([(bytearray(v.encode()),) for v in values], "value binary")
+    Messages carry the registry header unless `registered=False`. Offsets count from 0 on
+    partition 0, with a broker timestamp of 2026-01-01 10:00 UTC.
+    """
+
+    def build(messages, registered: bool = True):
+        ts = datetime(2026, 1, 1, 10, 0, 0)
+        rows = []
+        for i, m in enumerate(messages):
+            if isinstance(m, bytes):  # already serialized (e.g. by the producer's serializer)
+                value = m
+            else:
+                text = m if isinstance(m, str) else json.dumps(m)
+                value = wire(text, SCHEMA_ID if registered else None)
+            rows.append((bytearray(value), 0, i, ts))
+        return spark.createDataFrame(
+            rows, "value binary, partition int, offset long, timestamp timestamp"
+        )
 
     return build

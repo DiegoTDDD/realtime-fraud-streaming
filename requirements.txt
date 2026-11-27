@@ -1,8 +1,13 @@
-# Kafka client (Redpanda speaks the Kafka protocol)
-confluent-kafka==2.5.3
+# Kafka client (Redpanda speaks the Kafka protocol), with its schema registry client and the
+# JSON Schema serializer (ADR 0008)
+confluent-kafka[json,schemaregistry]==2.5.3
 
 # Spark Structured Streaming (3.5.8 fixes CVE-2026-32773, the History Server XSS)
 pyspark==3.5.8
+# Delta Lake tables for Bronze, quarantine and Gold (ADR 0007); 3.3 is the line for Spark 3.5
+delta-spark==3.3.2
+# Reads the Delta Gold table without Spark (dashboard, sample export)
+deltalake==1.7.0
 
 # Dashboard
 streamlit==1.66.1

@@ -14,6 +14,8 @@ data/quarantine/
 data/gold/
 data/_checkpoints/
 data/_spark_metadata/
+data/delta/
+data/ops/
 
 # Keep a small Gold sample for the deployed dashboard (see docs)
 !data/gold_sample/

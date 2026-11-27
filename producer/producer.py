@@ -10,14 +10,16 @@ streaming layer detects fraud purely from behavioral patterns.
 
 Every event is checked against the shared contract (contract/transaction.py)
 before it is sent; an event that breaks it is logged and dropped, so a bug in
-the generator never reaches the topic.
+the generator never reaches the topic. Events are serialized through the schema
+registry (ADR 0008): each message carries the registered schema's id, and the
+serializer validates the event against that schema. Register it first with
+`python contract/registry.py register`.
 
 Usage:
     python producer/producer.py
 Stop with Ctrl+C.
 """
 
-import json
 import logging
 import os
 import random
@@ -28,10 +30,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from confluent_kafka import KafkaError, Message, Producer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.json_schema import JSONSerializer
+from confluent_kafka.serialization import MessageField, SerializationContext
 from faker import Faker
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from contract.transaction import validate_event  # noqa: E402
+from contract.transaction import SCHEMA_PATH, validate_event  # noqa: E402
 
 log = logging.getLogger(__name__)
 Transaction = dict[str, Any]
@@ -39,7 +44,10 @@ Transaction = dict[str, Any]
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BOOTSTRAP_SERVERS = "localhost:19092"  # Redpanda OUTSIDE listener
+BOOTSTRAP_SERVERS = os.environ.get(
+    "KAFKA_BOOTSTRAP", "localhost:19092"
+)  # Redpanda OUTSIDE listener
+SCHEMA_REGISTRY_URL = os.environ.get("SCHEMA_REGISTRY_URL", "http://localhost:8081")
 TOPIC = "transactions"
 EVENTS_PER_SECOND = 10  # base throughput
 FRAUD_RATE = 0.02  # ~2% of events are fraudulent
@@ -190,9 +198,18 @@ def next_transaction() -> Transaction:
     return make_legit_transaction()
 
 
+def build_serializer() -> JSONSerializer:
+    """Serializer bound to the registered schema. It does not register schemas itself: a schema
+    change goes through contract/registry.py, where its compatibility is checked first."""
+    registry = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
+    return JSONSerializer(SCHEMA_PATH.read_text(), registry, conf={"auto.register.schemas": False})
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
+    serializer = build_serializer()
+    context = SerializationContext(TOPIC, MessageField.VALUE)
     interval = 1.0 / EVENTS_PER_SECOND
     sent = 0
     frauds = 0
@@ -209,7 +226,7 @@ def main() -> None:
             producer.produce(
                 TOPIC,
                 key=tx["card_id"],
-                value=json.dumps(tx),
+                value=serializer(tx, context),
                 callback=delivery_report,
             )
             producer.poll(0)

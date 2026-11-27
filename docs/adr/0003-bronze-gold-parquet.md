@@ -1,6 +1,6 @@
 # 0003. Bronze and Gold layers in Parquet, Gold in append mode
 
-**Status:** Accepted
+**Status:** Layering accepted. The storage format is superseded by [0007](0007-delta-lake-tables.md): the same layers are now Delta tables.
 
 ## Context
 Two consumers need the data: the dashboard needs small per-minute aggregates, and model training needs every transaction. Both run locally, with no database server.

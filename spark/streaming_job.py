@@ -1,18 +1,20 @@
 """
 Spark Structured Streaming job for real-time fraud analytics.
 
-Reads card transactions from a Redpanda (Kafka) topic and runs three queries:
+Reads card transactions from a Redpanda (Kafka) topic and runs three queries, each writing a
+Delta table with its own checkpoint, so a restart neither loses nor repeats a record (ADR 0007):
 
-  1. Bronze      - every transaction as received, typed, in Parquet (the
-                   faithful landing zone).
-  2. Quarantine  - events that break the contract (contract/transaction.py),
-                   with the original message and the reasons, in Parquet.
-  3. Gold        - 1-minute tumbling windows with a 2-minute watermark over the
-                   valid events: transaction counts, total/average amount and
-                   counts of each fraud pattern. Written to Parquet and echoed
-                   to the console as windows close.
+  1. Bronze      - every transaction as received, typed, with its Kafka partition, offset,
+                   broker timestamp and schema id; partitioned by ingest date.
+  2. Quarantine  - events that break the contract (contract/transaction.py) or arrived without
+                   the schema registry's header, with the original message and the reasons.
+  3. Gold        - 1-minute tumbling windows with a 2-minute watermark over the valid events:
+                   transaction counts, total/average amount and counts of each fraud pattern,
+                   also echoed to the console as windows close.
 
-The transformations live in spark/transforms.py, where they are unit-tested.
+Every query's progress is appended to data/ops/progress.jsonl (spark/progress.py), which
+spark/health.py reads. spark/maintenance.py compacts the tables. The transformations live in
+spark/transforms.py, where they are unit-tested.
 
 Run (inside the `fraud` conda env, with Redpanda up):
     python spark/streaming_job.py
@@ -38,9 +40,11 @@ if platform.system() == "Windows":
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)  # for the shared contract package
 
-from pyspark.sql import DataFrame, SparkSession  # noqa: E402
+from pyspark.sql import DataFrame  # noqa: E402
 from pyspark.sql.streaming import StreamingQuery  # noqa: E402
 
+from spark.progress import ProgressLog  # noqa: E402
+from spark.session import build_spark  # noqa: E402
 from spark.transforms import (  # noqa: E402
     gold_windows,
     invalid_events,
@@ -55,43 +59,50 @@ log = logging.getLogger(__name__)
 # Paths & config
 # ---------------------------------------------------------------------------
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-BRONZE_DIR = os.path.join(DATA_DIR, "bronze")
-GOLD_DIR = os.path.join(DATA_DIR, "gold")
-QUARANTINE_DIR = os.path.join(DATA_DIR, "quarantine")
+DELTA_DIR = os.path.join(DATA_DIR, "delta")
+BRONZE_DIR = os.path.join(DELTA_DIR, "bronze")
+GOLD_DIR = os.path.join(DELTA_DIR, "gold")
+QUARANTINE_DIR = os.path.join(DELTA_DIR, "quarantine")
 CHECKPOINT_DIR = os.path.join(DATA_DIR, "_checkpoints")
+PROGRESS_LOG = os.path.join(DATA_DIR, "ops", "progress.jsonl")
 
-KAFKA_BOOTSTRAP = "localhost:19092"
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "localhost:19092")
 TOPIC = "transactions"
-
-# Kafka connector package (Spark downloads the JAR on first run).
-KAFKA_PKG = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
-
-
-def build_spark() -> SparkSession:
-    return (
-        SparkSession.builder.appName("realtime-fraud-streaming")
-        .config("spark.jars.packages", KAFKA_PKG)
-        .config("spark.sql.shuffle.partitions", "4")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
+# One micro-batch every 10 s: fewer, larger files than "as fast as possible", and still well
+# inside the 1-minute windows.
+TRIGGER = "10 seconds"
 
 
-def write_parquet(df: DataFrame, name: str, path: str) -> StreamingQuery:
-    return (
-        df.writeStream.format("parquet")
-        .option("path", path)
-        .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, name))
+def write_delta(
+    df: DataFrame,
+    name: str,
+    path: str,
+    partition_by: list[str] | None = None,
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    available_now: bool = False,
+) -> StreamingQuery:
+    """Append a stream to a Delta table. The checkpoint records which source offsets each batch
+    committed, and Delta records which batch ids it already wrote, so a restarted query neither
+    skips nor repeats a batch. `available_now` processes what is there and stops (tests, backfills).
+    """
+    trigger = {"availableNow": True} if available_now else {"processingTime": TRIGGER}
+    writer = (
+        df.writeStream.format("delta")
+        .option("checkpointLocation", os.path.join(checkpoint_dir, name))
         .outputMode("append")
+        .trigger(**trigger)
         .queryName(name)
-        .start()
     )
+    if partition_by:
+        writer = writer.partitionBy(*partition_by)
+    return writer.start(path)
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    spark = build_spark()
+    spark = build_spark("realtime-fraud-streaming", kafka=True)
     spark.sparkContext.setLogLevel("WARN")
+    spark.streams.addListener(ProgressLog(PROGRESS_LOG))
 
     raw = (
         spark.readStream.format("kafka")
@@ -102,12 +113,12 @@ def main() -> None:
     )
     checked = with_violations(parse_events(raw))
 
-    write_parquet(checked.drop("raw_value", "violations"), "bronze", BRONZE_DIR)
-    write_parquet(invalid_events(checked), "quarantine", QUARANTINE_DIR)
+    write_delta(checked.drop("raw_value", "violations"), "bronze", BRONZE_DIR, ["ingest_date"])
+    write_delta(invalid_events(checked), "quarantine", QUARANTINE_DIR)
 
-    # Gold: append mode, because Parquet cannot be written in complete mode.
+    # Gold: append mode, so each window is written once, when the watermark closes it.
     gold = gold_windows(valid_events(checked))
-    write_parquet(gold, "gold", GOLD_DIR)
+    write_delta(gold, "gold", GOLD_DIR)
     # Also echo closed windows to the console for live visibility.
     (
         gold.writeStream.format("console")

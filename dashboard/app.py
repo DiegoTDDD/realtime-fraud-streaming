@@ -11,7 +11,6 @@ Run (inside the `fraud` conda env):
     streamlit run dashboard/app.py
 """
 
-import glob
 import os
 import time
 
@@ -23,7 +22,7 @@ import streamlit as st
 # Paths
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GOLD_DIR = os.path.join(PROJECT_ROOT, "data", "gold")
+GOLD_DIR = os.path.join(PROJECT_ROOT, "data", "delta", "gold")
 SAMPLE_PATH = os.path.join(PROJECT_ROOT, "data", "gold_sample", "windows.parquet")
 
 # ---------------------------------------------------------------------------
@@ -81,19 +80,14 @@ st.markdown(
 
 @st.cache_data(ttl=5)
 def load_gold() -> pd.DataFrame:
-    # Local: read the full Gold folder written by Spark.
-    # Deploy (no Spark): fall back to the small versioned sample.
-    files = glob.glob(os.path.join(GOLD_DIR, "*.parquet"))
-    if files:
-        frames = []
-        for f in files:
-            try:
-                frames.append(pd.read_parquet(f))
-            except Exception:
-                continue
-        if frames:
-            df = pd.concat(frames, ignore_index=True)
-            df = df.drop_duplicates(subset=["window_start", "window_end"])
+    # Local: read the Delta Gold table written by Spark (deltalake reads it without Spark,
+    # and only committed versions, so a batch being written is never half visible).
+    # Deploy (no Spark, no table): fall back to the small versioned sample.
+    if os.path.isdir(os.path.join(GOLD_DIR, "_delta_log")):
+        from deltalake import DeltaTable
+
+        df = DeltaTable(GOLD_DIR).to_pandas()
+        if not df.empty:
             return df.sort_values("window_start").reset_index(drop=True)
 
     if os.path.exists(SAMPLE_PATH):
@@ -154,19 +148,30 @@ st.markdown("<div style='height:1.4rem'></div>", unsafe_allow_html=True)
 st.markdown('<div class="eyebrow">Throughput</div>', unsafe_allow_html=True)
 st.markdown("### Transactions per minute")
 vol = go.Figure()
-vol.add_trace(go.Scatter(
-    x=df["window_start"], y=df["tx_count"],
-    mode="lines", line=dict(color=BLUE, width=2),
-    fill="tozeroy", fillcolor="rgba(88,166,255,0.10)",
-    name="tx/min",
-))
+vol.add_trace(
+    go.Scatter(
+        x=df["window_start"],
+        y=df["tx_count"],
+        mode="lines",
+        line=dict(color=BLUE, width=2),
+        fill="tozeroy",
+        fillcolor="rgba(88,166,255,0.10)",
+        name="tx/min",
+    )
+)
 vol.update_layout(
-    height=300, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-    margin=dict(l=10, r=10, t=10, b=10), font=dict(color=TEXT),
-    xaxis=dict(gridcolor=GRID), yaxis=dict(gridcolor=GRID),
+    height=300,
+    paper_bgcolor=PANEL,
+    plot_bgcolor=PANEL,
+    margin=dict(l=10, r=10, t=10, b=10),
+    font=dict(color=TEXT),
+    xaxis=dict(gridcolor=GRID),
+    yaxis=dict(gridcolor=GRID),
     showlegend=False,
 )
-st.plotly_chart(vol, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False})
+st.plotly_chart(
+    vol, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False}
+)
 
 # ---------------------------------------------------------------------------
 # Fraud by type over time
@@ -179,16 +184,35 @@ for label, ccol, color in [
     ("High amount", "fraud_high_amount", RED),
     ("Impossible travel", "fraud_impossible_travel", GREEN),
 ]:
-    fig.add_trace(go.Bar(
-        x=df["window_start"], y=df[ccol], name=label, marker_color=color,
-    ))
+    fig.add_trace(
+        go.Bar(
+            x=df["window_start"],
+            y=df[ccol],
+            name=label,
+            marker_color=color,
+        )
+    )
 fig.update_layout(
-    barmode="stack", height=320, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-    margin=dict(l=10, r=10, t=10, b=10), font=dict(color=TEXT),
-    xaxis=dict(gridcolor=GRID), yaxis=dict(gridcolor=GRID),
-    legend=dict(orientation="h", y=1.12, x=0, bgcolor="rgba(0,0,0,0)", borderwidth=0, font=dict(color=TEXT, size=13)),
+    barmode="stack",
+    height=320,
+    paper_bgcolor=PANEL,
+    plot_bgcolor=PANEL,
+    margin=dict(l=10, r=10, t=10, b=10),
+    font=dict(color=TEXT),
+    xaxis=dict(gridcolor=GRID),
+    yaxis=dict(gridcolor=GRID),
+    legend=dict(
+        orientation="h",
+        y=1.12,
+        x=0,
+        bgcolor="rgba(0,0,0,0)",
+        borderwidth=0,
+        font=dict(color=TEXT, size=13),
+    ),
 )
-st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False})
+st.plotly_chart(
+    fig, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False}
+)
 
 # ---------------------------------------------------------------------------
 # Recent windows — alert table
@@ -198,20 +222,29 @@ st.markdown("### Recent activity")
 recent = df.tail(12).iloc[::-1].copy()
 recent["avg_amount"] = recent["avg_amount"].round(2)
 recent["total_amount"] = recent["total_amount"].round(2)
-show = recent[[
-    "window_start", "tx_count", "total_amount", "avg_amount",
-    "fraud_card_testing", "fraud_high_amount",
-    "fraud_impossible_travel", "fraud_total",
-]].rename(columns={
-    "window_start": "Window",
-    "tx_count": "Tx",
-    "total_amount": "Total $",
-    "avg_amount": "Avg $",
-    "fraud_card_testing": "Card testing",
-    "fraud_high_amount": "High amount",
-    "fraud_impossible_travel": "Impossible travel",
-    "fraud_total": "Frauds",
-})
+show = recent[
+    [
+        "window_start",
+        "tx_count",
+        "total_amount",
+        "avg_amount",
+        "fraud_card_testing",
+        "fraud_high_amount",
+        "fraud_impossible_travel",
+        "fraud_total",
+    ]
+].rename(
+    columns={
+        "window_start": "Window",
+        "tx_count": "Tx",
+        "total_amount": "Total $",
+        "avg_amount": "Avg $",
+        "fraud_card_testing": "Card testing",
+        "fraud_high_amount": "High amount",
+        "fraud_impossible_travel": "Impossible travel",
+        "fraud_total": "Frauds",
+    }
+)
 
 
 def highlight_fraud(row):
@@ -220,10 +253,15 @@ def highlight_fraud(row):
 
 
 st.dataframe(
-    show.style.apply(highlight_fraud, axis=1).format({
-        "Total $": "${:,.0f}", "Avg $": "${:,.2f}", "Tx": "{:,}",
-    }),
-    use_container_width=True, hide_index=True,
+    show.style.apply(highlight_fraud, axis=1).format(
+        {
+            "Total $": "${:,.0f}",
+            "Avg $": "${:,.2f}",
+            "Tx": "{:,}",
+        }
+    ),
+    use_container_width=True,
+    hide_index=True,
 )
 
 st.caption(

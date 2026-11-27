@@ -4,7 +4,7 @@ Each function takes and returns a DataFrame and works the same on a streaming
 or a static DataFrame, so tests/test_transforms.py runs them on small static
 data with a local SparkSession, without Kafka.
 
-  parse_events      Kafka `value` bytes -> typed columns + event_time
+  parse_events      Kafka record (wire format) -> typed columns, event_time, lineage, schema id
   with_violations   adds `violations`: the contract rules (contract/transaction.py)
   valid_events / invalid_events
   gold_windows      1-minute tumbling windows: counts, amounts, fraud by pattern
@@ -29,24 +29,42 @@ WATERMARK = "2 minutes"
 
 
 def parse_events(raw: DataFrame) -> DataFrame:
-    """Kafka records (binary `value`) -> one column per contract field, plus event_time.
+    """Kafka records -> one column per contract field, event_time, lineage and schema id.
 
-    A field with the wrong JSON type becomes null rather than failing the batch,
-    so the contract check below can report it.
+    The producer serializes through the schema registry (ADR 0008), so each value is the
+    Confluent wire format: a 0 byte, the 4-byte schema id, then the JSON. A value without that
+    header gets a null schema_id and is quarantined as `unregistered_schema`; its JSON is still
+    parsed so the other reasons are reported too.
+
+    A field with the wrong JSON type becomes null rather than failing the batch, so the
+    contract check below can report it.
     """
+    value = F.col("value")
+    has_header = (F.length(value) >= 5) & (F.hex(F.substring(value, 1, 1)) == "00")
+    payload = F.when(has_header, F.expr("substring(value, 6, length(value) - 5)")).otherwise(value)
     return (
         raw.select(
-            F.col("value").cast("string").alias("raw_value"),
-            F.from_json(F.col("value").cast("string"), SCHEMA).alias("t"),
+            F.when(has_header, F.conv(F.hex(F.substring(value, 2, 4)), 16, 10).cast("int")).alias(
+                "schema_id"
+            ),
+            payload.cast("string").alias("raw_value"),
+            F.col("partition").alias("kafka_partition"),
+            F.col("offset").alias("kafka_offset"),
+            F.col("timestamp").alias("kafka_timestamp"),
         )
-        .select("raw_value", "t.*")
+        .withColumn("t", F.from_json("raw_value", SCHEMA))
+        .select(
+            "raw_value", "t.*", "schema_id", "kafka_partition", "kafka_offset", "kafka_timestamp"
+        )
         .withColumn("event_time", F.to_timestamp(F.col("timestamp")))
+        .withColumn("ingest_date", F.to_date("kafka_timestamp"))
     )
 
 
 def _violation_checks() -> list[Column]:
     is_fraud, fraud_type = F.col("is_fraud"), F.col("fraud_type")
-    checks = [F.when(F.col(name).isNull(), F.lit(f"invalid:{name}")) for name in REQUIRED]
+    checks = [F.when(F.col("schema_id").isNull(), F.lit("unregistered_schema"))]
+    checks += [F.when(F.col(name).isNull(), F.lit(f"invalid:{name}")) for name in REQUIRED]
     checks += [
         F.when(F.col("timestamp").isNotNull() & F.col("event_time").isNull(), "bad_timestamp"),
         F.when(F.col("amount") <= 0, "amount_not_positive"),
@@ -57,7 +75,8 @@ def _violation_checks() -> list[Column]:
 
 
 def with_violations(parsed: DataFrame) -> DataFrame:
-    """Add `violations` (array of reasons, same wording and order as validate_event)."""
+    """Add `violations`: `unregistered_schema` first when the message had no registry header,
+    then the contract's reasons with the same wording and order as validate_event."""
     return parsed.withColumn("violations", F.array_compact(F.array(*_violation_checks())))
 
 
@@ -68,7 +87,11 @@ def valid_events(checked: DataFrame) -> DataFrame:
 def invalid_events(checked: DataFrame) -> DataFrame:
     """Rows for the quarantine folder: the original message and why it was rejected."""
     return checked.filter(F.size("violations") > 0).select(
-        "raw_value", "violations", F.current_timestamp().alias("quarantined_at")
+        "raw_value",
+        "violations",
+        "kafka_partition",
+        "kafka_offset",
+        F.current_timestamp().alias("quarantined_at"),
     )
 
 
