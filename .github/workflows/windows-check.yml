@@ -131,9 +131,12 @@ jobs:
           dl https://packages.confluent.io/archive/7.7/confluent-community-7.7.1.tar.gz \
             || { echo "::error::could not download the Confluent community package"; exit 1; }
           mkdir -p /c/sr
-          tar -xzf sr.tgz -C /c/sr --strip-components=1 \
-            --wildcards '*/share/java/schema-registry/*' '*/share/java/confluent-common/*' \
-            '*/share/java/rest-utils/*' '*/etc/schema-registry/*'
+          # Some jars are symlinks into kafka-rest-lib. Git Bash's tar turns a symlink into a copy,
+          # which fails when the target is not extracted yet, so extract twice: the first pass
+          # creates the targets, the second the copies.
+          parts=("*/share/java/schema-registry/*" "*/share/java/confluent-common/*" "*/share/java/rest-utils/*" "*/share/java/kafka-rest-lib/*")
+          tar -xzf sr.tgz -C /c/sr --strip-components=1 --wildcards "${parts[@]}" 2>/dev/null || true
+          tar -xzf sr.tgz -C /c/sr --strip-components=1 --wildcards "${parts[@]}"
           cat > /c/sr/sr.properties <<'PROPS'
           listeners=http://0.0.0.0:8081
           kafkastore.bootstrap.servers=PLAINTEXT://localhost:19092
@@ -142,7 +145,7 @@ jobs:
           PROPS
           S=C:/sr/share/java
           # Java is called directly, for the same reasons as Kafka above.
-          nohup java -Xmx512M -cp "$S/schema-registry/*;$S/confluent-common/*;$S/rest-utils/*" \
+          nohup java -Xmx512M -cp "$S/schema-registry/*;$S/confluent-common/*;$S/rest-utils/*;$S/kafka-rest-lib/*" \
             io.confluent.kafka.schemaregistry.rest.SchemaRegistryMain C:/sr/sr.properties > /c/sr.log 2>&1 &
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8081/subjects >/dev/null; then echo "registry up after about $((i*3))s"; break; fi

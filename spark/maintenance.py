@@ -10,6 +10,8 @@ window references. Both are safe while the stream is writing: Delta lets a blind
 compaction commit together. Exits 1 if a table's row count changes or Bronze has duplicates.
 
 Run it from a scheduler (cron, Airflow, a CI schedule); it does not need the stream stopped.
+"rows" in the report are the table just before and just after the OPTIMIZE commit, which must be
+equal; appends the stream commits meanwhile do not count against it.
 """
 
 from __future__ import annotations
@@ -36,15 +38,38 @@ def active_files(spark: SparkSession, path: str) -> int:
 
 
 def compact(spark: SparkSession, path: str, retention_hours: float) -> dict:
+    """OPTIMIZE then VACUUM one table.
+
+    The stream may append while this runs, so row counts before and after the command are not
+    comparable. What must hold is that the OPTIMIZE commit itself changed no rows: the table at
+    the OPTIMIZE version has exactly the rows of the version just before it.
+    """
     from delta.tables import DeltaTable
 
     table = DeltaTable.forPath(spark, path)
-    rows_before, files_before = table.toDF().count(), active_files(spark, path)
+    files_before = active_files(spark, path)
     table.optimize().executeCompaction()
+    last = (
+        table.history(50)
+        .filter("operation = 'OPTIMIZE'")
+        .orderBy("version", ascending=False)
+        .first()
+    )
+    if last is None:  # nothing was worth compacting
+        rows_before = rows_after = table.toDF().count()
+    else:
+        version = last["version"]
+        read = spark.read.format("delta")
+        rows_before = read.option("versionAsOf", version - 1).load(path).count()
+        rows_after = read.option("versionAsOf", version).load(path).count()
     table.vacuum(retention_hours)
-    rows_after, files_after = table.toDF().count(), active_files(spark, path)
-    return {"rows_before": rows_before, "rows_after": rows_after,
-            "files_before": files_before, "files_after": files_after}  # fmt: skip
+    return {
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "files_before": files_before,
+        "files_after": active_files(spark, path),
+        "optimize_version": None if last is None else last["version"],
+    }
 
 
 def bronze_integrity(spark: SparkSession, path: str) -> dict:

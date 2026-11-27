@@ -125,6 +125,7 @@ def kafka_end_offsets(bootstrap: str, topic: str) -> dict[str, int] | None:
                 "bootstrap.servers": bootstrap,
                 "group.id": "health-check",
                 "enable.auto.commit": False,
+                "broker.address.family": "v4",  # "localhost" would try ::1 first and log noise
             }
         )
         meta = c.list_topics(topic, timeout=5)
