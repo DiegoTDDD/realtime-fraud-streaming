@@ -6,7 +6,7 @@
 
 **Problem.** Card fraud happens in seconds, and its signal is in patterns over time, such as a burst of tiny charges or a purchase far from home, rather than in any single transaction. A nightly batch report sees it a day late.
 
-**Solution.** A streaming pipeline that moves card transactions from Redpanda (Kafka API) through Spark Structured Streaming into Parquet layers and a live dashboard. It counts every fraud pattern per minute, and every event is checked against a contract on the way in.
+**Solution.** A streaming pipeline that moves card transactions from Redpanda (Kafka API) through Spark Structured Streaming into Delta Lake tables and a live dashboard. It counts every fraud pattern per minute, and every event is checked against a contract on the way in.
 
 - **Live dashboard:** [realtime-fraud-streaming.streamlit.app](https://realtime-fraud-streaming.streamlit.app) (serves a recorded sample, see [ADR 0006](docs/adr/0006-static-sample-for-the-public-dashboard.md))
 - **Design decisions:** [`docs/adr/`](docs/adr/README.md)
@@ -135,7 +135,7 @@ Card testing arrives in bursts, so it dominates the per-minute fraud counts even
    ```bash
    python spark/streaming_job.py
    ```
-   The first run downloads the Spark–Kafka connector and Delta Lake from Maven, so it needs internet access (they are cached afterwards).
+   The first run downloads the Spark–Kafka connector and Delta Lake from Maven Central (or Google's mirror of it, configured as a second repository), so it needs internet access; they are cached afterwards.
    The connector version in `spark/session.py` (`KAFKA_PKG`) must match the PySpark version in `requirements.txt` (3.5.8).
 
 6. **Start the producer** (terminal 2)

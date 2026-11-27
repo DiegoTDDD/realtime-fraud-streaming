@@ -79,7 +79,7 @@ st.markdown(
 
 
 @st.cache_data(ttl=5)
-def load_gold() -> pd.DataFrame:
+def load_gold() -> tuple[pd.DataFrame, str]:
     # Local: read the Delta Gold table written by Spark (deltalake reads it without Spark,
     # and only committed versions, so a batch being written is never half visible).
     # Deploy (no Spark, no table): fall back to the small versioned sample.
@@ -88,14 +88,14 @@ def load_gold() -> pd.DataFrame:
 
         df = DeltaTable(GOLD_DIR).to_pandas()
         if not df.empty:
-            return df.sort_values("window_start").reset_index(drop=True)
+            return df.sort_values("window_start").reset_index(drop=True), "live"
 
     if os.path.exists(SAMPLE_PATH):
         df = pd.read_parquet(SAMPLE_PATH)
         df = df.drop_duplicates(subset=["window_start", "window_end"])
-        return df.sort_values("window_start").reset_index(drop=True)
+        return df.sort_values("window_start").reset_index(drop=True), "sample"
 
-    return pd.DataFrame()
+    return pd.DataFrame(), "none"
 
 
 def kpi(col, label, value, kind=""):
@@ -115,9 +115,15 @@ with left:
     st.markdown("# Fraud Stream Monitor")
 with right:
     auto = st.toggle("Auto-refresh (5s)", value=False)
-    st.caption("Reads Gold windows written by Spark.")
 
-df = load_gold()
+df, source = load_gold()
+if source == "sample":
+    st.caption(
+        "Reading a recorded sample of Gold windows (data/gold_sample/): no Spark or Kafka runs on "
+        "this host. Run the pipeline locally for live data."
+    )
+elif source == "live":
+    st.caption("Reading the live Delta Gold table written by Spark.")
 
 if df.empty:
     st.info(
