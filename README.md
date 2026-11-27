@@ -85,11 +85,13 @@ Card testing arrives in bursts, so it dominates the per-minute fraud counts even
 
 ### Recent activity & alerts
 ![Recent activity](docs/screenshots/03-recent-activity.png)
-![Recent activity continued](docs/screenshots/04-recent-activity-2.png)
 
-### Redpanda Console — live messages
+### Redpanda Console — live messages, decoded through the schema registry
 ![Redpanda messages](docs/screenshots/05-redpanda-messages.png)
 ![Redpanda overview](docs/screenshots/06-redpanda-overview.png)
+
+### The registered event schema (`transactions-value`, BACKWARD compatibility)
+![Schema registry](docs/screenshots/07-schema-registry.png)
 
 ---
 

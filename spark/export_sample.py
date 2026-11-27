@@ -32,6 +32,9 @@ def main() -> None:
 
     df: pd.DataFrame = DeltaTable(GOLD_DIR).to_pandas()
     df = df.sort_values("window_start").reset_index(drop=True)
+    # The stream starts part-way through its first minute, so that window holds only part of
+    # a minute's transactions; it would read as a dip in the throughput chart.
+    df = df.iloc[1:].reset_index(drop=True)
 
     os.makedirs(SAMPLE_DIR, exist_ok=True)
     df.to_parquet(SAMPLE_PATH, index=False)

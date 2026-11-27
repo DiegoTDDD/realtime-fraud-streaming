@@ -33,3 +33,8 @@ services:
       - "127.0.0.1:8080:8080"     # Web UI -> open http://localhost:8080
     environment:
       KAFKA_BROKERS: redpanda:29092
+      # Decode the registry's wire format and show the registered schemas.
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+      REDPANDA_ADMINAPI_ENABLED: "true"
+      REDPANDA_ADMINAPI_URLS: http://redpanda:9644

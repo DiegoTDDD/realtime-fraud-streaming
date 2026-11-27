@@ -170,7 +170,7 @@ vol.update_layout(
     showlegend=False,
 )
 st.plotly_chart(
-    vol, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False}
+    vol, width="stretch", config={"scrollZoom": False, "displayModeBar": False}
 )
 
 # ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ fig.update_layout(
     ),
 )
 st.plotly_chart(
-    fig, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False}
+    fig, width="stretch", config={"scrollZoom": False, "displayModeBar": False}
 )
 
 # ---------------------------------------------------------------------------
@@ -222,6 +222,7 @@ st.markdown("### Recent activity")
 recent = df.tail(12).iloc[::-1].copy()
 recent["avg_amount"] = recent["avg_amount"].round(2)
 recent["total_amount"] = recent["total_amount"].round(2)
+recent["window_start"] = pd.to_datetime(recent["window_start"]).dt.strftime("%Y-%m-%d %H:%M UTC")
 show = recent[
     [
         "window_start",
@@ -260,13 +261,13 @@ st.dataframe(
             "Tx": "{:,}",
         }
     ),
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
 st.caption(
     f"{len(df)} windows · pipeline: producer → Redpanda → Spark Structured "
-    f"Streaming → Parquet (Gold) → this dashboard",
+    f"Streaming → Delta Lake (Gold) → this dashboard",
 )
 
 if auto:
