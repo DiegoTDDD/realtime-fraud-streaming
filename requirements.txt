@@ -7,7 +7,7 @@ pyspark==3.5.8
 # Delta Lake tables for Bronze, quarantine and Gold (ADR 0007); 3.3 is the line for Spark 3.5
 delta-spark==3.3.2
 # Reads the Delta Gold table without Spark (dashboard, sample export)
-deltalake==1.7.0
+deltalake==1.6.6
 
 # Dashboard
 streamlit==1.66.1
