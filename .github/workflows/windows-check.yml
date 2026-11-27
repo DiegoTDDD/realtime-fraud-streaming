@@ -131,10 +131,10 @@ jobs:
           dl https://packages.confluent.io/archive/7.7/confluent-community-7.7.1.tar.gz \
             || { echo "::error::could not download the Confluent community package"; exit 1; }
           mkdir -p /c/sr
-          # Some jars are symlinks into kafka-rest-lib. Git Bash's tar turns a symlink into a copy,
+          # Some jars are symlinks into other folders of share/java. Git Bash's tar turns a symlink into a copy,
           # which fails when the target is not extracted yet, so extract twice: the first pass
           # creates the targets, the second the copies.
-          parts=("*/share/java/schema-registry/*" "*/share/java/confluent-common/*" "*/share/java/rest-utils/*" "*/share/java/kafka-rest-lib/*")
+          parts=("*/share/java/*")
           tar -xzf sr.tgz -C /c/sr --strip-components=1 --wildcards "${parts[@]}" 2>/dev/null || true
           tar -xzf sr.tgz -C /c/sr --strip-components=1 --wildcards "${parts[@]}"
           cat > /c/sr/sr.properties <<'PROPS'

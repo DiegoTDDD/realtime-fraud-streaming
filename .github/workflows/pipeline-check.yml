@@ -175,7 +175,7 @@ jobs:
         run: |
           pkill -f streaming_job.py || true
           sleep 100
-          if python spark/health.py > health.txt; then
+          if python spark/health.py > health.txt 2>&1; then
             cat health.txt; echo "::error::health passed with the job stopped"; exit 1
           fi
           cat health.txt
